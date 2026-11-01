@@ -19330,3 +19330,155 @@ describe('Suite 49b — default keychain reader', () => {
     );
   });
 });
+
+// ── Suite 52 — limit detection from rate_limit_event (issue #75) ────────────
+// Event shape observed in the OCP proxy log (2026-10-05, 2026-11-01), redacted.
+import { anthropicLimitFromEvent as limitFromEvent52 } from './lib/providers/anthropic.mjs';
+import {
+  accountCooldownDurationMs as coolDuration52,
+  MAX_ACCOUNT_COOLDOWN_MS as maxCool52,
+  isAccountLimitError as isLimit52,
+  accountCooldownUntil as coolUntil52,
+  __resetAccountCooldowns as resetCool52,
+} from './lib/fallback/cooldown.mjs';
+
+describe('Suite 52 — limit detection from rate_limit_event', () => {
+  const rejected52 = (extra = {}) => ({
+    type: 'rate_limit_event',
+    info: {
+      status: 'rejected',
+      rateLimitType: 'five_hour',
+      resetsAt: 1793537400,
+      overageStatus: 'rejected',
+      isUsingOverage: false,
+      windows: { five_hour: { utilization: 1, resetsAt: 1793537400 }, seven_day: { utilization: 0.88, resetsAt: 1793804400 } },
+      ...extra,
+    },
+  });
+
+  function limitSpawn52(events, { exitCode = 1, stderr = '' } = {}) {
+    return function () {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = {
+        write: () => {},
+        end: () => {
+          setImmediate(() => {
+            for (const ev of events) proc.stdout.emit('data', Buffer.from(JSON.stringify(ev) + '\n'));
+            if (stderr) proc.stderr.emit('data', Buffer.from(stderr));
+            proc.stdout.emit('end');
+            proc.stderr.emit('end');
+            proc.emit('close', exitCode, null);
+          });
+        },
+      };
+      proc.killed = false;
+      proc.kill = () => {};
+      return proc;
+    };
+  }
+
+  const ir52 = () => ({ model: 'claude-sonnet-4-6', stream: true, messages: [{ role: 'user', content: 'Hi' }] });
+
+  afterEach(() => { __resetSpawnImpl(); resetCool52(); });
+
+  it('52a: anthropicLimitFromEvent returns type and reset time for rejected, null otherwise', () => {
+    assert.deepEqual(limitFromEvent52(rejected52()), { type: 'five_hour', resetsAtMs: 1793537400 * 1000 });
+    assert.equal(limitFromEvent52(rejected52({ status: 'allowed' })), null);
+    assert.equal(limitFromEvent52(rejected52({ status: 'allowed_warning' })), null);
+    assert.equal(limitFromEvent52({ type: 'result', info: { status: 'rejected' } }), null);
+    assert.equal(limitFromEvent52({ type: 'rate_limit_event' }), null);
+    assert.equal(limitFromEvent52(null), null);
+    assert.equal(limitFromEvent52(rejected52({ resetsAt: undefined })).resetsAtMs, null);
+    assert.equal(limitFromEvent52(rejected52({ rateLimitType: undefined })).type, 'unknown');
+  });
+
+  it('52b: spawn with a rejected rate_limit_event and exit 1 throws SPAWN_FAILED carrying err.limit, even with unrelated stderr', async () => {
+    __setSpawnImpl(limitSpawn52(
+      [{ type: 'system', subtype: 'init' }, rejected52()],
+      { stderr: '[claude-code:unrecognized_model] {"model":"x"}\n' },
+    ));
+    await assert.rejects(
+      async () => { for await (const _c of anthropic.spawn(ir52(), { accessToken: 'fake-52b' })) { /* drain */ } },
+      (e) => {
+        assert.equal(e.code, 'SPAWN_FAILED');
+        assert.match(e.message, /five_hour limit reached, resets 20/);
+        assert.equal(e.limit.type, 'five_hour');
+        assert.equal(e.limit.resetsAtMs, 1793537400 * 1000);
+        return true;
+      },
+    );
+  });
+
+  it('52c: without a rate_limit_event the old message and no err.limit stay', async () => {
+    __setSpawnImpl(limitSpawn52([{ type: 'system', subtype: 'init' }]));
+    await assert.rejects(
+      async () => { for await (const _c of anthropic.spawn(ir52(), { accessToken: 'fake-52c' })) { /* drain */ } },
+      (e) => e.message === 'claude exit 1' && e.limit === undefined,
+    );
+  });
+
+  it('52d: an allowed_warning event does not disturb a successful request', async () => {
+    __setSpawnImpl(limitSpawn52([
+      rejected52({ status: 'allowed_warning' }),
+      { type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'ok' } } },
+      { type: 'result', subtype: 'success', is_error: false, result: 'ok' },
+    ], { exitCode: 0 }));
+    const out = [];
+    for await (const c of anthropic.spawn(ir52(), { accessToken: 'fake-52d' })) out.push(c);
+    assert.equal(out.filter(c => c.type === 'delta').map(c => c.content).join(''), 'ok');
+    assert.equal(out.filter(c => c.type === 'stop').length, 1);
+  });
+
+  it('52e: a rejected event followed by a result with is_error attaches err.limit to that error too', async () => {
+    __setSpawnImpl(limitSpawn52([
+      rejected52(),
+      { type: 'result', subtype: 'error', is_error: true, result: 'boom' },
+    ]));
+    await assert.rejects(
+      async () => { for await (const _c of anthropic.spawn(ir52(), { accessToken: 'fake-52e' })) { /* drain */ } },
+      (e) => e.code === 'PROVIDER_ERROR' && e.limit?.type === 'five_hour',
+    );
+  });
+
+  it('52f: isAccountLimitError accepts err.limit without any text, but auth, timeout and concurrency codes still win', () => {
+    const limit = { type: 'five_hour', resetsAtMs: Date.now() + 1000 };
+    assert.equal(isLimit52(Object.assign(new Error('claude exit 1'), { code: 'SPAWN_FAILED', limit })), true);
+    assert.equal(isLimit52(Object.assign(new Error('x'), { code: 'SPAWN_TIMEOUT', limit })), false);
+    assert.equal(isLimit52(Object.assign(new Error('x'), { code: 'AUTH_MISSING', limit })), false);
+    assert.equal(isLimit52(Object.assign(new Error('x'), { code: 'CONCURRENCY_LIMIT', limit })), false);
+  });
+
+  it('52g: accountCooldownDurationMs runs until the reported reset, is capped, and falls back otherwise', () => {
+    const now = 1_000_000;
+    assert.equal(coolDuration52({ limit: { resetsAtMs: now + 7200_000 } }, 300_000, now), 7200_000);
+    assert.equal(coolDuration52({ limit: { resetsAtMs: now + 100 * 24 * 3600_000 } }, 300_000, now), maxCool52);
+    assert.equal(coolDuration52({ limit: { resetsAtMs: now - 5 } }, 300_000, now), 300_000);
+    assert.equal(coolDuration52({ limit: { resetsAtMs: null } }, 111, now), 111);
+    assert.equal(coolDuration52(new Error('x'), 222, now), 222);
+    assert.equal(coolDuration52(null, 333, now), 333);
+  });
+
+  it('52h: engine cools the account down until the reported reset time, not the fixed window', async () => {
+    const resetsAtMs = Date.now() + 2 * 3600_000;
+    const limitErr = Object.assign(new Error('claude exit 1'), { code: 'SPAWN_FAILED', limit: { type: 'five_hour', resetsAtMs } });
+    const events = [];
+    const chain = [
+      { provider: 'anthropic', model: 'm', account: 'a' },
+      { provider: 'anthropic', model: 'm', account: 'b' },
+    ];
+    const hop = async (_p, _m, _ir, account) => {
+      if (account === 'a') throw limitErr;
+      return [{ type: 'delta', role: 'assistant', content: 'ok' }, { type: 'stop', finish_reason: 'stop' }];
+    };
+    const r = await executeWithFallback(chain, { model: 'm', messages: [{ role: 'user', content: 'x' }], stream: false }, hop, {
+      logEvent: (l, ev, data) => events.push([ev, data]),
+      accountCooldownMs: 300_000,
+    });
+    assert.equal(r.accountUsed, 'b');
+    const until = coolUntil52('anthropic', 'a');
+    assert.ok(Math.abs(until - resetsAtMs) < 2000, `cool-down ended at ${until}, expected about ${resetsAtMs}`);
+    assert.equal(events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_until, until);
+  });
+});
