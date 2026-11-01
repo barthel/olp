@@ -248,7 +248,11 @@ OLP distinguishes **Candidate Providers** (declared as intended, not yet pinned)
 
 | Model ID | Display name | Context window | Notes |
 |---|---|---|---|
-| `claude-opus-4-8` | Claude Opus 4.8 | 200 000 | Newest opus; `opus` alias points here |
+| `claude-sonnet-5-5` | Claude Sonnet 5.5 | 1 000 000 | Callable by literal id; needs a Claude Code CLI that knows the id (2.1.284 or newer per OCP) |
+| `claude-opus-5-5` | Claude Opus 5.5 | 1 000 000 | Callable by literal id |
+| `claude-sonnet-5` | Claude Sonnet 5 | 1 000 000 | Callable by literal id |
+| `claude-opus-5` | Claude Opus 5 | 1 000 000 | Callable by literal id |
+| `claude-opus-4-8` | Claude Opus 4.8 | 200 000 | `opus` alias points here |
 | `claude-opus-4-7` | Claude Opus 4.7 | 200 000 | Still callable by literal id |
 | `claude-sonnet-4-6` | Claude Sonnet 4.6 | 200 000 | `sonnet` + `claude` aliases point here |
 | `claude-haiku-4-5` | Claude Haiku 4.5 | 200 000 | `haiku` alias points here |

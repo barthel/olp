@@ -45,6 +45,38 @@
       "candidate": true,
       "models": [
         {
+          "id": "claude-sonnet-5-5",
+          "displayName": "Claude Sonnet 5.5",
+          "contextWindow": 1000000,
+          "deprecated": false,
+          "created": 1790640000,
+          "_comment": "claude-sonnet-5-5 added 2026-11-01. contextWindow 1e6 per the OCP CHANGELOG entry for Claude Sonnet 5.5 (read from Claude Code CLI 2.1.284 model registry); the CLI 2.1.283 installed here does not list this id, so it was not read locally. `created` is the date OCP added the model (2026-09-29), not an Anthropic announcement timestamp; replace with a primary source when available."
+        },
+        {
+          "id": "claude-opus-5-5",
+          "displayName": "Claude Opus 5.5",
+          "contextWindow": 1000000,
+          "deprecated": false,
+          "created": 1790294400,
+          "_comment": "claude-opus-5-5 added 2026-11-01. id, display name and contextWindow 1e6 read from the Claude Code CLI 2.1.283 model registry (first_party id, knowledge cutoff June 2026). `created` is the date OCP added the model (2026-09-25), not an Anthropic announcement timestamp."
+        },
+        {
+          "id": "claude-sonnet-5",
+          "displayName": "Claude Sonnet 5",
+          "contextWindow": 1000000,
+          "deprecated": false,
+          "created": 1784160000,
+          "_comment": "claude-sonnet-5 added 2026-11-01. id, display name and contextWindow 1e6 read from the Claude Code CLI 2.1.283 model registry (knowledge cutoff January 2026). `created` is the date OCP added the model (2026-07-16), not an Anthropic announcement timestamp."
+        },
+        {
+          "id": "claude-opus-5",
+          "displayName": "Claude Opus 5",
+          "contextWindow": 1000000,
+          "deprecated": false,
+          "created": 1785110400,
+          "_comment": "claude-opus-5 added 2026-11-01. id, display name and contextWindow 1e6 read from the Claude Code CLI 2.1.283 model registry (knowledge cutoff May 2026). `created` is the date OCP added the model (2026-07-27), not an Anthropic announcement timestamp."
+        },
+        {
           "id": "claude-opus-4-8",
           "displayName": "Claude Opus 4.8",
           "contextWindow": 200000,

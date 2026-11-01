@@ -1051,12 +1051,14 @@ describe('Anthropic plugin (D4)', () => {
     assert.deepEqual(anthropic.models, registryIds);
   });
 
-  it('anthropic.models contains the four expected model IDs (opus-4-8 added 2026-05-29)', () => {
-    assert.ok(anthropic.models.includes('claude-opus-4-8'));
-    assert.ok(anthropic.models.includes('claude-opus-4-7'));
-    assert.ok(anthropic.models.includes('claude-sonnet-4-6'));
-    assert.ok(anthropic.models.includes('claude-haiku-4-5'));
-    assert.equal(anthropic.models.length, 4);
+  it('anthropic.models contains the eight expected model IDs (opus-4-8 added 2026-05-29; 5.x family added 2026-11-01)', () => {
+    for (const id of [
+      'claude-sonnet-5-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-opus-5',
+      'claude-opus-4-8', 'claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5',
+    ]) {
+      assert.ok(anthropic.models.includes(id), `missing ${id}`);
+    }
+    assert.equal(anthropic.models.length, 8);
   });
 
   // ── Test 4: getProviderForModel finds anthropic for each model ────────
@@ -7388,7 +7390,7 @@ describe('/v1/models population + X-OLP-* error headers (Suite 17)', () => {
 
   // ── 17a: /v1/models with anthropic enabled → 4 canonical + 4 alias entries ─────────────
 
-  it('17a: /v1/models with anthropic enabled → 200 + 8 entries (4 canonical + 4 aliases) with owned_by="anthropic" (opus-4-8 added 2026-05-29)', async () => {
+  it('17a: /v1/models with anthropic enabled → 200 + 12 entries (8 canonical + 4 aliases) with owned_by="anthropic" (5.x family added 2026-11-01)', async () => {
     setProviders17({ anthropic: true });
     const s = createServer17();
     await new Promise((resolve, reject) => {
@@ -7402,9 +7404,10 @@ describe('/v1/models population + X-OLP-* error headers (Suite 17)', () => {
       const body = JSON.parse(r.body);
       assert.equal(body.object, 'list');
       assert.ok(Array.isArray(body.data), 'data must be an array');
-      // Anthropic has 4 canonical models (opus-4-8, opus-4-7, sonnet-4-6, haiku-4-5)
-      // + 4 aliases (claude, sonnet, opus, haiku) in models-registry.json
-      assert.equal(body.data.length, 8, `Expected 8 anthropic entries (4 canonical + 4 aliases), got ${body.data.length}`);
+      // Anthropic has 8 canonical models (sonnet-5-5, opus-5-5, sonnet-5, opus-5,
+      // opus-4-8, opus-4-7, sonnet-4-6, haiku-4-5) + 4 aliases (claude, sonnet,
+      // opus, haiku) in models-registry.json
+      assert.equal(body.data.length, 12, `Expected 12 anthropic entries (8 canonical + 4 aliases), got ${body.data.length}`);
       for (const entry of body.data) {
         assert.equal(entry.owned_by, 'anthropic', `Expected owned_by='anthropic', got '${entry.owned_by}'`);
       }
