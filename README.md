@@ -272,12 +272,15 @@ OLP reads `~/.olp/config.json` at startup. § "[Manual install § Step 4](#4-wri
     "fallback_detail_header_policy": "owner_only"
   },
   "providers": {
-    "enabled": { "<provider-key>": true }
+    "enabled": { "<provider-key>": true },
+    "<provider-key>": {
+      "accounts": { "<account-id>": { "dir": "/absolute/path/to/credential-dir" } }
+    }
   },
   "routing": {
     "chains": {
       "<requested-model>": [
-        { "provider": "<key>", "model": "<provider-model-id>" },
+        { "provider": "<key>", "model": "<provider-model-id>", "account": "<account-id>" },
         { "provider": "<key>", "model": "<provider-model-id>" }
       ]
     },
@@ -298,6 +301,8 @@ Field guide:
 - **`auth.advertise_anonymous_key`** — default `false`. When true (+ `allow_anonymous: true` + a key created with `olp-keys keygen --anonymous --advertise`), `/health.anonymousKey` exposes the plaintext token so `olp-connect <ip>` is zero-config. **Trusted-LAN only** — see [ADR 0011](./docs/adr/0011-anonymous-key-deployment-context.md).
 - **`auth.fallback_detail_header_policy`** — controls `X-OLP-Fallback-Detail` response header emission. `owner_only` (default) only shows tuples to owner identity; debug surface to LAN family without leaking to anonymous.
 - **`providers.enabled`** — flip a provider plugin on. Only enable providers whose CLI you've authenticated; OLP doesn't do its own OAuth.
+- **`providers.<provider-key>.accounts.<account-id>.dir`** — optional. Registers an additional login of that provider's CLI. `dir` must be an absolute path to the credential directory of that login (anthropic: contains `.credentials.json`; codex: contains `auth.json`). OLP never writes into it; each spawn sees it only through its ephemeral home. Supported for `anthropic` and `codex`; `mistral` (Vibe) has no account support yet. Accounts are mounted through the per-spawn ephemeral home (isolation Layers 1 and 2), which stays active with `OLP_SANDBOX_DISABLED=1`; that flag only disables Layer 3.
+- **`routing.chains[].account`** — optional per-hop field selecting one of the accounts above. A hop without `account` keeps using the operator's default login. An unknown account id fails the request with `AUTH_MISSING` instead of silently falling back to the default login. Concurrency slots are counted per `provider#account`. Streaming requests on an account hop are served through the buffered path. Accounts of one provider share cache entries (the cache key does not include the account).
 - **`routing.chains`** — keyed by the model name your IDE / client requests. Each entry is an ordered list of fallback hops; each hop's `model` is what gets passed to that provider's CLI. F7 fix (D75) — the hop-level `model` field finally overrides the IR's request model during cross-provider fallback.
 - **`routing.soft_triggers`** — parsed and stored but **inert at v0.4.x** — the `quotaStatus()` polling data path is deferred to v1.x per [ADR 0004 Amendment 2](./docs/adr/0004-fallback-engine.md#amendment-2--2026-05-24-soft-triggers-deferred-to-v1x-d22). Startup emits a warn if non-empty so the inert state is visible.
 - **`streaming.heartbeat_interval_ms`** — default `0` (disabled). Set > 0 (e.g. `15000`) to emit SSE keepalive frames during silent windows. Required behind reverse proxies (nginx / Cloudflare Tunnel / Tailscale Funnel) with 60s idle aborts.

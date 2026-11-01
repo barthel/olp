@@ -51,6 +51,7 @@ import {
   DEFAULT_MAX_CONCURRENT_SPAWNS,
 } from './lib/providers/index.mjs';
 import { ProviderError } from './lib/providers/base.mjs';
+import { resolveAccountDir } from './lib/accounts.mjs';
 import { computeCacheKey, hasCacheControl, extractCacheControlMarkers } from './lib/cache/keys.mjs';
 import { CacheStore } from './lib/cache/store.mjs';
 import {
@@ -1269,7 +1270,12 @@ async function handleChatCompletions(req, res) {
   // computation below can consume it after executeWithFallback completes.
   let lastHopWasCached = false;
 
-  async function executeHopFn(hopProvider, hopModel, irReq) {
+  async function executeHopFn(hopProvider, hopModel, irReq, hopAccount = null) {
+    // Multi-account per provider (issue #75): the concurrency counter is keyed
+    // by `provider#account` so each account has its own maxConcurrent budget.
+    // Without an account the key is the bare provider name (unchanged).
+    // The cache key deliberately stays account-free.
+    const hopSpawnKey = hopAccount ? `${hopProvider}#${hopAccount}` : hopProvider;
     const hopCacheKey = computeCacheKey(hopProvider, hopModel, irReq);
     const hopProviderPlugin = loadedProviders.get(hopProvider);
 
@@ -1306,7 +1312,7 @@ async function handleChatCompletions(req, res) {
       // next hop. validateProvider guarantees hints.maxConcurrent is present;
       // DEFAULT_MAX_CONCURRENT_SPAWNS is a defense-in-depth fallback.
       const maxConcurrent = hopProviderPlugin.hints?.maxConcurrent ?? DEFAULT_MAX_CONCURRENT_SPAWNS;
-      if (!tryAcquireSpawn(hopProvider, maxConcurrent)) {
+      if (!tryAcquireSpawn(hopSpawnKey, maxConcurrent)) {
         const concurrencyErr = new ProviderError(
           `provider ${hopProvider} at maxConcurrent (${maxConcurrent}) — advancing to next hop`,
           'CONCURRENCY_LIMIT',
@@ -1317,7 +1323,7 @@ async function handleChatCompletions(req, res) {
         // queried directly. Since tryAcquireSpawn returned false the value
         // equals maxConcurrent — read it explicitly for diagnostic clarity
         // rather than echoing the limit (avoids future-reader confusion).
-        concurrencyErr.activeSpawns = getActiveSpawnCount(hopProvider);
+        concurrencyErr.activeSpawns = getActiveSpawnCount(hopSpawnKey);
         throw concurrencyErr;
       }
 
@@ -1344,11 +1350,26 @@ async function handleChatCompletions(req, res) {
       // via prepareIsolatedEnvironment. For providers without ISOLATION declared,
       // this returns the identity shape (no-op). cleanup fires in finally below.
       // Authority: ADR 0014 Amendment 1 § A1.2 + ADR 0002 Amendment 9.
-      const hopIsolationCtx = await prepareIsolatedEnvironment({
-        provider: hopProviderPlugin,
-        keyId,
-        reqId: requestId,
-      });
+      // Multi-account (issue #75): a hop with an account resolves its credential
+      // directory from config.json providers.<name>.accounts. Resolution and
+      // isolation setup can throw (AUTH_MISSING for an unknown account or a
+      // provider without account support); the slot acquired above is released
+      // here because the try/finally below has not been entered yet.
+      let hopIsolationCtx;
+      try {
+        const hopAccountDir = hopAccount
+          ? resolveAccountDir(_fallbackConfig, hopProvider, hopAccount)
+          : null;
+        hopIsolationCtx = await prepareIsolatedEnvironment({
+          provider: hopProviderPlugin,
+          keyId,
+          reqId: requestId,
+          accountDir: hopAccountDir,
+        });
+      } catch (isolationErr) {
+        releaseSpawn(hopSpawnKey);
+        throw isolationErr;
+      }
 
       try {
         try {
@@ -1393,7 +1414,7 @@ async function handleChatCompletions(req, res) {
         // the slot so the next caller can acquire it. Single-threaded JS
         // guarantees no other caller has incremented this provider's count
         // between our tryAcquireSpawn() above and this releaseSpawn().
-        releaseSpawn(hopProvider);
+        releaseSpawn(hopSpawnKey);
         // Task #8: cleanup ephemeral home created by prepareIsolatedEnvironment.
         // Best-effort (cleanup swallows errors internally). Fires on both happy
         // path and error path via finally. No-op for providers without ISOLATION.
@@ -1513,7 +1534,10 @@ async function handleChatCompletions(req, res) {
   // outcome from getOrComputeStreaming is the TTL-race safety net; in
   // practice it should not fire because preCheckHit excludes alive entries.
   // See docs/adr/0005-cache-cross-provider.md Amendment 8 + issue #16.
-  if (ir.stream && chain.length === 1 && !bypassCacheForFirstHop && !preCheckHit && cacheableForFirstHop) {
+  // Multi-account (issue #75): a hop that names an account is excluded from this
+  // lane. The lane spawns without account resolution; the buffered path below
+  // resolves the account and isolates credentials per hop.
+  if (ir.stream && chain.length === 1 && !chain[0].account && !bypassCacheForFirstHop && !preCheckHit && cacheableForFirstHop) {
     const streamProvider = chain[0].provider;
     const streamModel = chain[0].model;
     const streamCacheKey = computeCacheKey(streamProvider, streamModel, ir);

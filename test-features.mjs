@@ -9,7 +9,7 @@
  *   D5 adds: Suite 9 (cache layer unit + HTTP integration), Suite 10 (Anthropic E2E gated)
  */
 
-import { describe, it, before, after, beforeEach } from 'node:test';
+import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { request as httpRequest } from 'node:http';
 import { EventEmitter } from 'node:events';
@@ -18316,5 +18316,429 @@ describe('Suite 44 — sandbox Layer 3 E2E test (PI231 only) [SKIP: awaiting Tas
 
   it('44d: TODO — cleanup() removes ephemeral dir [awaiting Task #9]', () => {
     assert.ok(true, 'placeholder — real test lands in Task #9');
+  });
+});
+
+// ── Suite 45 — multi-account per provider (issue #75, PR 1 foundation) ─────
+import { mkdtempSync as mkdtempS45, mkdirSync as mkdirS45, writeFileSync as writeS45, readFileSync as readS45, readlinkSync as readlinkS45, rmSync as rmS45 } from 'node:fs';
+import { tmpdir as tmpdirS45 } from 'node:os';
+import { join as joinS45 } from 'node:path';
+import { extractAccounts, resolveAccountDir } from './lib/accounts.mjs';
+import { ISOLATION as anthropicIsolationS45 } from './lib/providers/anthropic.mjs';
+import { ISOLATION as codexIsolationS45 } from './lib/providers/codex.mjs';
+
+describe('Suite 45 — multi-account per provider (foundation)', () => {
+  it('45a: extractAccounts keeps entries with a string dir and drops the rest', () => {
+    const out = extractAccounts({
+      anthropic: { accounts: { work: { dir: '/a/work' }, empty: { dir: '' }, bad: 'x', nodir: {} } },
+      codex: { enabled: true },
+      mistral: { accounts: { only: { dir: 5 } } },
+    });
+    assert.deepEqual(out, { anthropic: { work: { dir: '/a/work' } } });
+    assert.deepEqual(extractAccounts(undefined), {});
+    assert.deepEqual(extractAccounts(null), {});
+  });
+
+  it('45b: resolveAccountDir returns the configured dir', () => {
+    const cfg = { accounts: { anthropic: { work: { dir: '/a/work' } } } };
+    assert.equal(resolveAccountDir(cfg, 'anthropic', 'work'), '/a/work');
+  });
+
+  it('45c: resolveAccountDir throws AUTH_MISSING for unknown account, unknown provider, missing config and relative dir', () => {
+    const cfg = { accounts: { anthropic: { work: { dir: '/a/work' }, rel: { dir: 'relative/dir' } } } };
+    for (const [c, p, a] of [
+      [cfg, 'anthropic', 'nope'],
+      [cfg, 'codex', 'work'],
+      [null, 'anthropic', 'work'],
+      [cfg, 'anthropic', 'rel'],
+    ]) {
+      assert.throws(
+        () => resolveAccountDir(c, p, a),
+        (e) => e.code === 'AUTH_MISSING',
+        `expected AUTH_MISSING for ${p}/${a}`,
+      );
+    }
+  });
+
+  it('45d: buildDefaultChain carries account from config and leaves hops without account untouched', () => {
+    const loaded = new Map();
+    const chain = buildDefaultChain('m', loaded, {
+      m: [
+        { provider: 'anthropic', model: 'a', account: 'work' },
+        { provider: 'anthropic', model: 'a', account: '' },
+        { provider: 'anthropic', model: 'a' },
+      ],
+    }, {});
+    assert.equal(chain[0].account, 'work');
+    assert.equal('account' in chain[1], false, 'empty account string must not create the key');
+    assert.equal('account' in chain[2], false, 'hop without account must keep its pre-existing shape');
+  });
+
+  it('45e: executeWithFallback passes the hop account as 4th argument and advances to the next account', async () => {
+    const seen = [];
+    const hopFn = async (provider, model, _ir, account) => {
+      seen.push([provider, account]);
+      if (account === 'work') throw new ProviderError('limit', 'SPAWN_FAILED');
+      return [{ type: 'delta', role: 'assistant', content: 'ok' }, { type: 'stop', finish_reason: 'stop' }];
+    };
+    const chain = [
+      { provider: 'anthropic', model: 'm', account: 'work' },
+      { provider: 'anthropic', model: 'm', account: 'private' },
+    ];
+    const res = await executeWithFallback(chain, makeIR({ model: 'm' }), hopFn);
+    assert.deepEqual(seen, [['anthropic', 'work'], ['anthropic', 'private']]);
+    assert.equal(res.fallbackHops, 1);
+    assert.ok(res.chunks, 'second account must serve the request');
+  });
+
+  it('45f: executeWithFallback passes null account for hops without one (backward compatible)', async () => {
+    let got = 'unset';
+    const hopFn = async (_p, _m, _ir, account) => {
+      got = account;
+      return [{ type: 'stop', finish_reason: 'stop' }];
+    };
+    await executeWithFallback([{ provider: 'anthropic', model: 'm' }], makeIR({ model: 'm' }), hopFn);
+    assert.equal(got, null);
+  });
+
+  it('45g: loadFallbackConfigSync exposes accounts from config.json and defaults to {}', () => {
+    const dir = mkdtempS45(joinS45(tmpdirS45(), 'olp-s45g-'));
+    try {
+      const p = joinS45(dir, 'config.json');
+      writeS45(p, JSON.stringify({ providers: { enabled: { anthropic: true }, anthropic: { accounts: { work: { dir: '/a/work' } } } } }));
+      const cfg = loadFallbackConfigSync(p);
+      assert.deepEqual(cfg.accounts, { anthropic: { work: { dir: '/a/work' } } });
+      assert.deepEqual(loadFallbackConfigSync(joinS45(dir, 'missing.json')).accounts, {});
+      writeS45(p, JSON.stringify({ providers: { enabled: { anthropic: true } } }));
+      assert.deepEqual(loadFallbackConfigSync(p).accounts, {});
+    } finally {
+      rmS45(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('45h: prepareIsolatedEnvironment mounts the anthropic account credential into the ephemeral home', async () => {
+    const acct = mkdtempS45(joinS45(tmpdirS45(), 'olp-s45h-'));
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let ctx;
+    try {
+      writeS45(joinS45(acct, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"acct-token"}}');
+      ctx = await prepareIsolatedEnvironment({
+        provider: { name: 'anthropic', ISOLATION: anthropicIsolationS45 },
+        keyId: 'k45h',
+        reqId: 'r45h',
+        accountDir: acct,
+      });
+      const link = joinS45(ctx.ephemeralRoot, '.claude', '.credentials.json');
+      assert.equal(readlinkS45(link), joinS45(acct, '.credentials.json'));
+      assert.match(readS45(link, 'utf8'), /acct-token/);
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      if (ctx) await ctx.cleanup();
+      rmS45(acct, { recursive: true, force: true });
+    }
+  });
+
+  it('45i: prepareIsolatedEnvironment mounts the codex account auth.json under .codex', async () => {
+    const acct = mkdtempS45(joinS45(tmpdirS45(), 'olp-s45i-'));
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let ctx;
+    try {
+      writeS45(joinS45(acct, 'auth.json'), '{"tokens":{"access_token":"codex-acct"}}');
+      ctx = await prepareIsolatedEnvironment({
+        provider: { name: 'codex', ISOLATION: codexIsolationS45 },
+        keyId: 'k45i',
+        reqId: 'r45i',
+        accountDir: acct,
+      });
+      assert.match(readS45(joinS45(ctx.ephemeralRoot, '.codex', 'auth.json'), 'utf8'), /codex-acct/);
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      if (ctx) await ctx.cleanup();
+      rmS45(acct, { recursive: true, force: true });
+    }
+  });
+
+  it('45j: prepareIsolatedEnvironment rejects an account for a provider without accountCredentialMounts (no silent default login)', async () => {
+    for (const provider of [
+      { name: 'mistral' },
+      { name: 'x', ISOLATION: { credentialMounts: [], requiredHomePaths: [] } },
+    ]) {
+      await assert.rejects(
+        () => prepareIsolatedEnvironment({ provider, keyId: 'k45j', reqId: 'r45j', accountDir: '/a/work' }),
+        (e) => e.code === 'AUTH_MISSING',
+      );
+    }
+  });
+
+  it('45k: without accountDir the static credentialMounts are used (default login unchanged)', async () => {
+    const home = mkdtempS45(joinS45(tmpdirS45(), 'olp-s45k-'));
+    const src = joinS45(home, 'default-cred.json');
+    writeS45(src, 'default-login');
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let ctx;
+    try {
+      ctx = await prepareIsolatedEnvironment({
+        provider: {
+          name: 'mock',
+          ISOLATION: {
+            credentialMounts: [[src, 'cred.json']],
+            accountCredentialMounts: () => { throw new Error('must not be called without accountDir'); },
+            requiredHomePaths: [],
+          },
+        },
+        keyId: 'k45k',
+        reqId: 'r45k',
+      });
+      assert.equal(readS45(joinS45(ctx.ephemeralRoot, 'cred.json'), 'utf8'), 'default-login');
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      if (ctx) await ctx.cleanup();
+      rmS45(home, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Suite 46 — multi-account wiring in server.mjs (issue #75, PR 1) ─────────
+describe('Suite 46 — multi-account wiring in handleChatCompletions', () => {
+  let s46;
+  let p46;
+  let savedToken46;
+
+  function okSpawn46() {
+    return function (_bin, _args, _opts) {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = {
+        write: () => {},
+        end: () => {
+          setImmediate(() => {
+            proc.stdout.emit('data', Buffer.from(
+              JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'Hello from suite 46' } } }) + '\n' +
+              JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'Hello from suite 46' }) + '\n',
+            ));
+            proc.stdout.emit('end');
+            proc.stderr.emit('end');
+            proc.emit('close', 0, null);
+          });
+        },
+      };
+      proc.killed = false;
+      proc.kill = () => {};
+      return proc;
+    };
+  }
+
+  before(async () => {
+    savedToken46 = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'fake-token-suite-46';
+    __setAuthConfig({ allow_anonymous: true, owner_only_endpoints: [], fallback_detail_header_policy: 'all' });
+    __setProvidersEnabled({ anthropic: true });
+    __setSpawnImpl(okSpawn46());
+    s46 = createOlpServer();
+    await new Promise((resolve, reject) => {
+      s46.listen(0, '127.0.0.1', resolve);
+      s46.once('error', reject);
+    });
+    p46 = s46.address().port;
+  });
+
+  after(async () => {
+    __resetFallbackConfig();
+    __resetProvidersEnabled();
+    __resetSpawnImpl();
+    __resetSpawnCounters();
+    if (savedToken46 !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken46;
+    else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    await new Promise(r => s46.close(r));
+  });
+
+  function chat46(content, stream = false) {
+    return fetch({
+      port: p46,
+      method: 'POST',
+      path: '/v1/chat/completions',
+      body: { model: 'claude-sonnet-4-6', stream, messages: [{ role: 'user', content }] },
+    });
+  }
+
+  function cfg46(accounts) {
+    __setFallbackConfig({
+      chains: { 'claude-sonnet-4-6': [{ provider: 'anthropic', model: 'claude-sonnet-4-6', account: 'work' }] },
+      soft_triggers: {},
+      accounts,
+    });
+  }
+
+  it('46a: hop with an unconfigured account fails (no silent default login) and releases its concurrency slot', async () => {
+    __clearCache();
+    __resetSpawnCounters();
+    cfg46({});
+    const r = await chat46('unknown-account-46a');
+    assert.notEqual(r.status, 200, `must not be served by the default login; got ${r.status}`);
+    assert.equal(getActiveSpawnCount('anthropic#work'), 0, 'slot must be released when isolation setup throws');
+    assert.equal(getActiveSpawnCount('anthropic'), 0);
+  });
+
+  it('46b: streaming request with a single account hop does not use the unaccounted live lane', async () => {
+    __clearCache();
+    __resetSpawnCounters();
+    cfg46({});
+    const r = await chat46('stream-unknown-account-46b', true);
+    assert.notEqual(r.status, 200, `stream lane must not spawn with the default login; got ${r.status}`);
+    assert.equal(getActiveSpawnCount('anthropic#work'), 0);
+  });
+
+  it('46c: configured account is served and the slot is counted under provider#account then released', async () => {
+    __clearCache();
+    __resetSpawnCounters();
+    cfg46({ anthropic: { work: { dir: '/tmp/olp-s46-acct' } } });
+    const r = await chat46('configured-account-46c');
+    assert.equal(r.status, 200, `got ${r.status}: ${r.body.slice(0, 200)}`);
+    assert.equal(r.headers['x-olp-provider-used'], 'anthropic');
+    assert.equal(getActiveSpawnCount('anthropic#work'), 0);
+  });
+
+  it('46d: configured account with stream:true is served via the buffered path', async () => {
+    __clearCache();
+    __resetSpawnCounters();
+    cfg46({ anthropic: { work: { dir: '/tmp/olp-s46-acct' } } });
+    const r = await chat46('configured-account-stream-46d', true);
+    assert.equal(r.status, 200, `got ${r.status}: ${r.body.slice(0, 200)}`);
+    assert.match(r.body, /Hello from suite 46/);
+  });
+
+  it('46e: while the account spawn runs, the slot is counted under provider#account and not under the bare provider', async () => {
+    __clearCache();
+    __resetSpawnCounters();
+    cfg46({ anthropic: { work: { dir: '/tmp/olp-s46-acct' } } });
+    const inner = okSpawn46();
+    let during = null;
+    __setSpawnImpl(function (bin, args, opts) {
+      during = { account: getActiveSpawnCount('anthropic#work'), bare: getActiveSpawnCount('anthropic') };
+      return inner(bin, args, opts);
+    });
+    try {
+      const r = await chat46('counter-key-46e');
+      assert.equal(r.status, 200, `got ${r.status}: ${r.body.slice(0, 200)}`);
+      assert.deepEqual(during, { account: 1, bare: 0 });
+    } finally {
+      __setSpawnImpl(okSpawn46());
+    }
+  });
+});
+
+// ── Suite 47 — account-aware preflight and token env (issue #75, PR 1) ──────
+describe('Suite 47 — account-aware auth preflight and spawn env', () => {
+  let acct47;
+  let savedEnv47;
+
+  function capturingSpawn47(sink) {
+    const inner = makeMockSpawnNDJSON(['ok']);
+    return function (bin, args, opts) {
+      sink.push({ bin, args, env: opts.env });
+      return inner(bin, args, opts);
+    };
+  }
+
+  async function drain47(iter) {
+    const chunks = [];
+    for await (const c of iter) chunks.push(c);
+    return chunks;
+  }
+
+  before(() => {
+    acct47 = mkdtempS45(joinS45(tmpdirS45(), 'olp-s47-'));
+    savedEnv47 = {
+      token: process.env.CLAUDE_CODE_OAUTH_TOKEN,
+      codexPath: process.env.OPENAI_CODEX_AUTH_PATH,
+    };
+  });
+
+  afterEach(() => {
+    __resetSpawnImpl();
+    codexResetSpawnImpl();
+    rmS45(joinS45(acct47, '.credentials.json'), { force: true });
+    rmS45(joinS45(acct47, 'auth.json'), { force: true });
+    for (const [key, val] of [['CLAUDE_CODE_OAUTH_TOKEN', savedEnv47.token], ['OPENAI_CODEX_AUTH_PATH', savedEnv47.codexPath]]) {
+      if (val !== undefined) process.env[key] = val; else delete process.env[key];
+    }
+  });
+
+  after(() => {
+    rmS45(acct47, { recursive: true, force: true });
+  });
+
+  it('47a: anthropic readAuthArtifact(accountDir) reads only that directory and ignores the env token', () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'default-env-token';
+    assert.equal(readAuthArtifact(acct47), null, 'empty account dir must not fall back to the env token');
+    writeS45(joinS45(acct47, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"acct-47a"}}');
+    assert.equal(readAuthArtifact(acct47).accessToken, 'acct-47a');
+    assert.equal(readAuthArtifact().accessToken, 'default-env-token', 'default login path unchanged');
+  });
+
+  it('47b: codex readAuthArtifact(accountDir) reads only that directory and ignores OPENAI_CODEX_AUTH_PATH', () => {
+    const other = joinS45(acct47, 'other-auth.json');
+    writeS45(other, '{"tokens":{"access_token":"default-codex"}}');
+    process.env.OPENAI_CODEX_AUTH_PATH = other;
+    assert.equal(codexReadAuthArtifact(acct47), null);
+    writeS45(joinS45(acct47, 'auth.json'), '{"tokens":{"access_token":"codex-47b"}}');
+    assert.equal(codexReadAuthArtifact(acct47).accessToken, 'codex-47b');
+    assert.equal(codexReadAuthArtifact().accessToken, 'default-codex', 'default login path unchanged');
+  });
+
+  it('47c: anthropic spawn with an account lacking credentials fails AUTH_MISSING even if the env token is set', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'default-env-token';
+    const sink = [];
+    __setSpawnImpl(capturingSpawn47(sink));
+    const ir = makeIR({ model: 'claude-sonnet-4-6', stream: false, messages: [{ role: 'user', content: 'Hi' }] });
+    await assert.rejects(
+      () => drain47(anthropic.spawn(ir, null, { accountDir: acct47, envOverrides: {} })),
+      (e) => e.code === 'AUTH_MISSING' && e.message.includes(acct47),
+    );
+    assert.equal(sink.length, 0, 'no process may be spawned without the account credentials');
+  });
+
+  it('47d: anthropic spawn with an account does not forward CLAUDE_CODE_OAUTH_TOKEN; without account it does', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'default-env-token';
+    writeS45(joinS45(acct47, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"acct-47d"}}');
+    const sink = [];
+    __setSpawnImpl(capturingSpawn47(sink));
+    const ir = makeIR({ model: 'claude-sonnet-4-6', stream: false, messages: [{ role: 'user', content: 'Hi' }] });
+    await drain47(anthropic.spawn(ir, null, { accountDir: acct47, envOverrides: {} }));
+    assert.equal(sink.length, 1);
+    assert.equal(sink[0].env.CLAUDE_CODE_OAUTH_TOKEN, undefined, 'account spawn must not inherit the process-wide token');
+    await drain47(anthropic.spawn(ir, null, { envOverrides: {} }));
+    assert.equal(sink[1].env.CLAUDE_CODE_OAUTH_TOKEN, 'default-env-token', 'default login keeps the env token');
+  });
+
+  it('47e: codex spawn with an account lacking auth.json fails AUTH_MISSING and spawns nothing', async () => {
+    const other = joinS45(acct47, 'other-auth.json');
+    writeS45(other, '{"tokens":{"access_token":"default-codex"}}');
+    process.env.OPENAI_CODEX_AUTH_PATH = other;
+    const sinkCalls = [];
+    codexSetSpawnImpl((...a) => { sinkCalls.push(a); return makeMockCodexSpawn(['{"type":"stop"}'])(...a); });
+    const ir = makeIR({ model: 'gpt-5.5', stream: false, messages: [{ role: 'user', content: 'Hi' }] });
+    await assert.rejects(
+      () => drain47(codex.spawn(ir, null, { accountDir: acct47, envOverrides: {} })),
+      (e) => e.code === 'AUTH_MISSING' && e.message.includes(acct47),
+    );
+    assert.equal(sinkCalls.length, 0);
+  });
+
+  it('47f: prepareIsolatedEnvironment returns the accountDir (null without account)', async () => {
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    const ctxs = [];
+    try {
+      writeS45(joinS45(acct47, '.credentials.json'), '{"claudeAiOauth":{"accessToken":"acct-47f"}}');
+      const provider = { name: 'anthropic', ISOLATION: anthropicIsolationS45 };
+      ctxs.push(await prepareIsolatedEnvironment({ provider, keyId: 'k47f', reqId: 'r47f1', accountDir: acct47 }));
+      ctxs.push(await prepareIsolatedEnvironment({ provider, keyId: 'k47f', reqId: 'r47f2' }));
+      assert.equal(ctxs[0].accountDir, acct47);
+      assert.equal(ctxs[1].accountDir, null);
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      for (const c of ctxs) await c.cleanup();
+    }
   });
 });
