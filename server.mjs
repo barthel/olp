@@ -1898,6 +1898,7 @@ async function handleChatCompletions(req, res) {
   try {
     fallbackResult = await executeWithFallback(chain, ir, executeHopFn, {
       logEvent,
+      accountCooldownMs: _fallbackConfig?.account_cooldown_ms,
     });
   } catch (e) {
     // executeWithFallback throws only on programming errors (empty chain).
@@ -1920,6 +1921,7 @@ async function handleChatCompletions(req, res) {
     originalError,
     triedProviders,
     fallbackDetail,  // D40 (issue #7): per-hop failure tuples for X-OLP-Fallback-Detail
+    accountUsed = null,
   } = fallbackResult;
 
   // ── Chain exhausted or non-trigger error ─────────────────────────────────
@@ -2043,6 +2045,7 @@ async function handleChatCompletions(req, res) {
   // Audit ctx capture for success path (audit fires on res.on('finish');
   // status_code + latency_ms populated then).
   auditCtx.provider = providerUsed;
+  if (accountUsed) auditCtx.account = accountUsed;
   auditCtx.fallback_hops = fallbackHops;
   auditCtx.tried_providers = (Array.isArray(fallbackDetail) ? fallbackDetail.map(t => t?.provider).filter(Boolean) : []).concat([providerUsed]);
   auditCtx.cache_status = cacheStatus;

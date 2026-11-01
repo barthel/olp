@@ -19088,3 +19088,245 @@ describe('Suite 50 — quota probe and dashboard rows per account', () => {
     assert.ok(!/default/.test(plain[0]), 'no tag when there are no accounts');
   });
 });
+
+// ── Suite 51 — account cool-down and limit trigger (issue #75, PR 2) ────────
+import {
+  markAccountCooldown as markCool51,
+  accountCooldownUntil as coolUntil51,
+  isAccountLimitError as isLimit51,
+  __resetAccountCooldowns as resetCool51,
+} from './lib/fallback/cooldown.mjs';
+import { loadFallbackConfigSync as loadCfg51 } from './lib/fallback/engine.mjs';
+
+describe('Suite 51 — account cool-down and limit trigger', () => {
+  const IR51 = { model: 'm', messages: [{ role: 'user', content: 'x' }], stream: false };
+  const chain51 = () => ([
+    { provider: 'anthropic', model: 'm', account: 'a' },
+    { provider: 'anthropic', model: 'm', account: 'b' },
+  ]);
+  const ok51 = [{ type: 'delta', role: 'assistant', content: 'ok' }, { type: 'stop', finish_reason: 'stop' }];
+  const limitErr51 = () => Object.assign(new Error("You've hit your usage limit"), { code: 'PROVIDER_ERROR' });
+  const hopFn51 = (outcomes, calls) => async (provider, model, _ir, account) => {
+    calls.push(account);
+    const o = outcomes[account];
+    if (o instanceof Error) throw o;
+    return ok51;
+  };
+
+  afterEach(() => resetCool51());
+
+  it('51a: isAccountLimitError recognises limit wording and 429, not auth, timeout or generic errors', () => {
+    assert.equal(isLimit51(new Error("You've hit your usage limit")), true);
+    assert.equal(isLimit51(new Error('5-hour limit reached')), true);
+    assert.equal(isLimit51(new Error('Weekly limit exceeded')), true);
+    assert.equal(isLimit51(new Error('HTTP 429 Too Many Requests')), true);
+    assert.equal(isLimit51(Object.assign(new Error('x'), { statusCode: 429 })), true);
+    assert.equal(isLimit51(new Error('segmentation fault')), false);
+    assert.equal(isLimit51(Object.assign(new Error('rate limit'), { code: 'AUTH_MISSING' })), false);
+    assert.equal(isLimit51(Object.assign(new Error('usage limit'), { code: 'SPAWN_TIMEOUT' })), false);
+    assert.equal(isLimit51(null), false);
+  });
+
+  it('51b: a limit error on account a advances to account b, marks a as cooling down, reports accountUsed', async () => {
+    const calls = [];
+    const events = [];
+    const r = await executeWithFallback(chain51(), IR51, hopFn51({ a: limitErr51() }, calls), {
+      logEvent: (lvl, ev, data) => events.push([ev, data]),
+    });
+    assert.deepEqual(calls, ['a', 'b']);
+    assert.equal(r.fallbackHops, 1);
+    assert.equal(r.accountUsed, 'b');
+    assert.ok(coolUntil51('anthropic', 'a') > Date.now());
+    assert.equal(coolUntil51('anthropic', 'b'), null);
+    const ev = events.find(([n]) => n === 'fallback_account_limit');
+    assert.equal(ev[1].account, 'a');
+    assert.equal(r.fallbackDetail[0].account, 'a');
+  });
+
+  it('51c: the next request skips the cooling account without calling its hop', async () => {
+    markCool51('anthropic', 'a', 60_000);
+    const calls = [];
+    const events = [];
+    const r = await executeWithFallback(chain51(), IR51, hopFn51({}, calls), { logEvent: (l, ev) => events.push(ev) });
+    assert.deepEqual(calls, ['b']);
+    assert.equal(r.accountUsed, 'b');
+    assert.ok(events.includes('fallback_account_cooldown_skip'));
+    assert.equal(r.fallbackDetail[0].code, 'ACCOUNT_COOLDOWN');
+  });
+
+  it('51d: the last hop is tried even when its account is cooling down', async () => {
+    markCool51('anthropic', 'a', 60_000);
+    markCool51('anthropic', 'b', 60_000);
+    const calls = [];
+    const r = await executeWithFallback(chain51(), IR51, hopFn51({}, calls));
+    assert.deepEqual(calls, ['b']);
+    assert.equal(r.accountUsed, 'b');
+    assert.ok(Array.isArray(r.chunks));
+  });
+
+  it('51e: a limit-like error on a hop without account keeps the old behaviour (surfaces, no cool-down)', async () => {
+    const calls = [];
+    const chain = [{ provider: 'anthropic', model: 'm' }, { provider: 'codex', model: 'm' }];
+    const r = await executeWithFallback(chain, IR51, hopFn51({ null: limitErr51() }, calls));
+    assert.equal(r.chunks, null);
+    assert.equal(r.originalError.code, 'PROVIDER_ERROR');
+    assert.equal(calls.length, 1);
+    assert.equal(coolUntil51('anthropic', null), null);
+  });
+
+  it('51f: a non-limit error on an account hop surfaces and sets no cool-down', async () => {
+    const calls = [];
+    const err = Object.assign(new Error('model not found'), { code: 'PROVIDER_ERROR' });
+    const r = await executeWithFallback(chain51(), IR51, hopFn51({ a: err }, calls));
+    assert.equal(r.chunks, null);
+    assert.deepEqual(calls, ['a']);
+    assert.equal(coolUntil51('anthropic', 'a'), null);
+  });
+
+  it('51g: the cool-down ends: expired entries read as null and a longer window is never shortened', () => {
+    const t0 = 1_000_000;
+    const until = markCool51('anthropic', 'a', 1000, t0);
+    assert.equal(coolUntil51('anthropic', 'a', t0 + 999), until);
+    assert.equal(coolUntil51('anthropic', 'a', t0 + 1000), null);
+    markCool51('anthropic', 'a', 5000, t0);
+    assert.equal(markCool51('anthropic', 'a', 1000, t0), t0 + 5000);
+  });
+
+  it('51h: options.accountCooldownMs sets the window length', async () => {
+    const events = [];
+    const before = Date.now();
+    await executeWithFallback(chain51(), IR51, hopFn51({ a: limitErr51() }, []), {
+      logEvent: (l, ev, data) => events.push([ev, data]),
+      accountCooldownMs: 3_600_000,
+    });
+    const until = events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_until;
+    assert.ok(until - before >= 3_600_000 - 50 && until - before < 3_600_000 + 5000, `window was ${until - before}`);
+  });
+
+  it('51i: routing.account_cooldown_seconds is read from config.json; invalid or missing falls back to 300 s', () => {
+    const d = mkdtempS45(joinS45(tmpdirS45(), 'olp-s51-'));
+    try {
+      const p = (name, routing) => { const f = joinS45(d, name); writeS45(f, JSON.stringify({ routing })); return f; };
+      assert.equal(loadCfg51(p('a.json', { account_cooldown_seconds: 90 })).account_cooldown_ms, 90_000);
+      assert.equal(loadCfg51(p('b.json', {})).account_cooldown_ms, 300_000);
+      assert.equal(loadCfg51(p('c.json', { account_cooldown_seconds: 'x' })).account_cooldown_ms, 300_000);
+      assert.equal(loadCfg51(p('d.json', { account_cooldown_seconds: -5 })).account_cooldown_ms, 300_000);
+    } finally {
+      rmS45(d, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Suite 51 (server) — account in the audit row', () => {
+  let srv51;
+  let port51;
+  let savedToken51;
+
+  function okSpawn51() {
+    return function () {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = {
+        write: () => {},
+        end: () => {
+          setImmediate(() => {
+            proc.stdout.emit('data', Buffer.from(
+              JSON.stringify({ type: 'stream_event', event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'hi 51' } } }) + '\n' +
+              JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'hi 51' }) + '\n',
+            ));
+            proc.stdout.emit('end');
+            proc.stderr.emit('end');
+            proc.emit('close', 0, null);
+          });
+        },
+      };
+      proc.killed = false;
+      proc.kill = () => {};
+      return proc;
+    };
+  }
+
+  before(async () => {
+    savedToken51 = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'fake-token-suite-51';
+    __setAuthConfig({ allow_anonymous: true, owner_only_endpoints: [], fallback_detail_header_policy: 'all' });
+    __setProvidersEnabled({ anthropic: true });
+    __setSpawnImpl(okSpawn51());
+    srv51 = createOlpServer();
+    await new Promise((resolve, reject) => { srv51.listen(0, '127.0.0.1', resolve); srv51.once('error', reject); });
+    port51 = srv51.address().port;
+  });
+
+  after(async () => {
+    __resetFallbackConfig();
+    __resetProvidersEnabled();
+    __resetSpawnImpl();
+    __resetSpawnCounters();
+    if (savedToken51 !== undefined) process.env.CLAUDE_CODE_OAUTH_TOKEN = savedToken51; else delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+    await new Promise(r => srv51.close(r));
+  });
+
+  async function lastAuditRow51() {
+    const f = joinS45(process.env.OLP_HOME, 'logs', 'audit.ndjson');
+    for (let i = 0; i < 40; i++) {
+      try {
+        const lines = readFileS50(f, 'utf8').trim().split('\n');
+        const row = JSON.parse(lines[lines.length - 1]);
+        if (row.path === '/v1/chat/completions' && row.status_code) return row;
+      } catch { /* not there yet */ }
+      await new Promise(r => setTimeout(r, 25));
+    }
+    return null;
+  }
+
+  it('51j: the audit row of a request served by an account hop carries the account, a default-login row does not', async () => {
+    __clearCache();
+    __setFallbackConfig({
+      chains: { 'claude-sonnet-4-6': [{ provider: 'anthropic', model: 'claude-sonnet-4-6', account: 'work' }] },
+      soft_triggers: {},
+      accounts: { anthropic: { work: { dir: '/tmp/olp-s51-acct' } } },
+    });
+    const r1 = await fetch({ port: port51, method: 'POST', path: '/v1/chat/completions',
+      body: { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'audit-account-51j' }] } });
+    assert.equal(r1.status, 200, r1.body.slice(0, 200));
+    const row1 = await lastAuditRow51();
+    assert.equal(row1?.account, 'work');
+
+    __clearCache();
+    __setFallbackConfig({ chains: {}, soft_triggers: {}, accounts: {} });
+    const r2 = await fetch({ port: port51, method: 'POST', path: '/v1/chat/completions',
+      body: { model: 'claude-sonnet-4-6', messages: [{ role: 'user', content: 'audit-default-51j' }] } });
+    assert.equal(r2.status, 200, r2.body.slice(0, 200));
+    await new Promise(r => setTimeout(r, 150));
+    const row2 = await lastAuditRow51();
+    assert.equal(row2?.account, undefined);
+  });
+});
+
+// ── Suite 49b — default keychain reader passes the user-database home (issue #75) ──
+import { __setKeychainExec, __resetKeychainExec } from './lib/accounts.mjs';
+
+describe('Suite 49b — default keychain reader', () => {
+  afterEach(() => { __resetKeychainExec(); __resetKeychainReader(); });
+
+  it('49i: the default reader calls the helper with keychainEnv() and the service name, and trims the result', () => {
+    const calls = [];
+    __setKeychainExec((bin, args, opts) => { calls.push({ bin, args, opts }); return '  tok-kc-49i\n'; });
+    const out = resolveAccountS49({ accounts: { anthropic: { t: { token_keychain: 'svc-49i' } } } }, 'anthropic', 't');
+    assert.deepEqual(out, { token: 'tok-kc-49i' });
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].args.includes('svc-49i'));
+    assert.equal(calls[0].bin, process.platform === 'darwin' ? 'security' : 'secret-tool');
+    assert.equal(calls[0].opts.env.HOME, userInfoS49().homedir);
+    assert.equal(calls[0].opts.timeout, 5000);
+  });
+
+  it('49j: a failing helper call is treated as an empty keychain', () => {
+    __setKeychainExec(() => { throw new Error('item not found'); });
+    assert.throws(
+      () => resolveAccountS49({ accounts: { anthropic: { t: { token_keychain: 'svc' } } } }, 'anthropic', 't'),
+      (e) => e.code === 'AUTH_MISSING',
+    );
+  });
+});
