@@ -2209,6 +2209,7 @@ async function handleManagementDashboardData(req, res) {
         quota_v2 = await auditAggregateProviderQuota({
           providers: loadedProviders,
           accounts: _fallbackConfig?.accounts ?? {},
+          chains: _fallbackConfig?.chains,
           resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
         });
       } catch (err) {
@@ -2255,6 +2256,7 @@ async function handleManagementQuota(req, res) {
         quota_v2 = await auditAggregateProviderQuota({
           providers: loadedProviders,
           accounts: _fallbackConfig?.accounts ?? {},
+          chains: _fallbackConfig?.chains,
           resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
         });
       } catch (err) {

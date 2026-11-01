@@ -19087,6 +19087,34 @@ describe('Suite 50 — quota probe and dashboard rows per account', () => {
     const plain = render([row('anthropic', null)]);
     assert.ok(!/default/.test(plain[0]), 'no tag when there are no accounts');
   });
+
+  const rows50 = (chains, accounts = { anthropic: { a: { token_file: '/x' }, b: { token_file: '/y' } } }) => aggregateQuotaS50({
+    providers: new Map([['anthropic', { quotaStatus: (ctx) => quotaStatus38(ctx) }]]),
+    accounts,
+    chains,
+    resolveCredential: () => ({ token: 'tok-a-50' }),
+  }).then((rows) => rows.map((r) => r.account));
+
+  it('50l: default row is hidden when every hop of the provider names an account', async () => {
+    const chains = { m: [{ provider: 'anthropic', model: 'm', account: 'a' }, { provider: 'anthropic', model: 'm', account: 'b' }] };
+    assert.deepEqual(await rows50(chains), ['a', 'b']);
+  });
+
+  it('50m: default row stays when a hop of the provider runs without account', async () => {
+    const chains = { m: [{ provider: 'anthropic', model: 'm', account: 'a' }, { provider: 'anthropic', model: 'm' }] };
+    assert.deepEqual(await rows50(chains), [null, 'a', 'b']);
+  });
+
+  it('50n: default row stays when no chain names the provider, when chains are empty or not passed', async () => {
+    assert.deepEqual(await rows50({ m: [{ provider: 'codex', model: 'm' }] }), [null, 'a', 'b']);
+    assert.deepEqual(await rows50({}), [null, 'a', 'b']);
+    assert.deepEqual(await rows50(undefined), [null, 'a', 'b']);
+  });
+
+  it('50o: default row stays when the provider has no configured accounts', async () => {
+    const chains = { m: [{ provider: 'anthropic', model: 'm', account: 'a' }] };
+    assert.deepEqual(await rows50(chains, {}), [null]);
+  });
 });
 
 // ── Suite 51 — account cool-down and limit trigger (issue #75, PR 2) ────────
