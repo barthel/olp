@@ -18833,3 +18833,64 @@ describe('Suite 48 — token_file accounts', () => {
     assert.equal(sink[0].CLAUDE_CODE_OAUTH_TOKEN, undefined);
   });
 });
+
+// ── Suite 49 — token_env / token_keychain sources (issue #75, PR 1) ─────────
+import { resolveAccount as resolveAccountS49, extractAccounts as extractAccountsS49, __setKeychainReader, __resetKeychainReader } from './lib/accounts.mjs';
+
+describe('Suite 49 — token source chain (file, env, keychain)', () => {
+  let dir49;
+  const ENV49 = 'OLP_TEST_TOKEN_S49';
+
+  before(() => { dir49 = mkdtempS45(joinS45(tmpdirS45(), 'olp-s49-')); });
+  afterEach(() => { __resetKeychainReader(); delete process.env[ENV49]; });
+  after(() => { rmS45(dir49, { recursive: true, force: true }); });
+
+  const cfg49 = (entry) => ({ accounts: { anthropic: { t: entry } } });
+
+  it('49a: extractAccounts keeps all token source fields of one entry', () => {
+    const out = extractAccountsS49({ anthropic: { accounts: { a: { token_file: '/x/t', token_env: 'E', token_keychain: 'svc', junk: 1 } } } });
+    assert.deepEqual(out, { anthropic: { a: { token_file: '/x/t', token_env: 'E', token_keychain: 'svc' } } });
+  });
+
+  it('49b: token_env supplies the token (trimmed)', () => {
+    process.env[ENV49] = '  tok-env-49b \n';
+    assert.deepEqual(resolveAccountS49(cfg49({ token_env: ENV49 }), 'anthropic', 't'), { token: 'tok-env-49b' });
+  });
+
+  it('49c: token_keychain supplies the token via the configured service name', () => {
+    const asked = [];
+    __setKeychainReader((svc) => { asked.push(svc); return 'tok-kc-49c\n'; });
+    assert.deepEqual(resolveAccountS49(cfg49({ token_keychain: 'olp-anthropic-b' }), 'anthropic', 't'), { token: 'tok-kc-49c' });
+    assert.deepEqual(asked, ['olp-anthropic-b']);
+  });
+
+  it('49d: a missing file falls back to env, then to keychain', () => {
+    const missing = joinS45(dir49, 'nope');
+    __setKeychainReader(() => 'tok-kc-49d');
+    assert.deepEqual(resolveAccountS49(cfg49({ token_file: missing, token_env: ENV49, token_keychain: 'svc' }), 'anthropic', 't'), { token: 'tok-kc-49d' });
+    process.env[ENV49] = 'tok-env-49d';
+    assert.deepEqual(resolveAccountS49(cfg49({ token_file: missing, token_env: ENV49, token_keychain: 'svc' }), 'anthropic', 't'), { token: 'tok-env-49d' });
+  });
+
+  it('49e: an existing file wins over env and keychain, and keychain is not queried then', () => {
+    const f = joinS45(dir49, 'tok-49e');
+    writeS45(f, 'tok-file-49e\n');
+    process.env[ENV49] = 'tok-env-49e';
+    __setKeychainReader(() => { throw new Error('keychain must not be queried'); });
+    assert.deepEqual(resolveAccountS49(cfg49({ token_file: f, token_env: ENV49, token_keychain: 'svc' }), 'anthropic', 't'), { token: 'tok-file-49e' });
+  });
+
+  it('49f: no source yields a token -> AUTH_MISSING that names the sources but never a token value', () => {
+    process.env[ENV49] = '   ';
+    __setKeychainReader(() => '');
+    assert.throws(
+      () => resolveAccountS49(cfg49({ token_file: joinS45(dir49, 'nope'), token_env: ENV49, token_keychain: 'svc-49f' }), 'anthropic', 't'),
+      (e) => e.code === 'AUTH_MISSING' && e.message.includes('svc-49f') && e.message.includes(ENV49) && e.message.includes('nope'),
+    );
+  });
+
+  it('49g: a throwing keychain reader is treated as empty, not as a crash', () => {
+    __setKeychainReader(() => { throw new Error('boom'); });
+    assert.throws(() => resolveAccountS49(cfg49({ token_keychain: 'svc' }), 'anthropic', 't'), (e) => e.code === 'AUTH_MISSING');
+  });
+});
