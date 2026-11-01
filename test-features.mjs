@@ -18835,7 +18835,8 @@ describe('Suite 48 — token_file accounts', () => {
 });
 
 // ── Suite 49 — token_env / token_keychain sources (issue #75, PR 1) ─────────
-import { resolveAccount as resolveAccountS49, extractAccounts as extractAccountsS49, __setKeychainReader, __resetKeychainReader } from './lib/accounts.mjs';
+import { resolveAccount as resolveAccountS49, extractAccounts as extractAccountsS49, __setKeychainReader, __resetKeychainReader, keychainEnv } from './lib/accounts.mjs';
+import { userInfo as userInfoS49 } from 'node:os';
 
 describe('Suite 49 — token source chain (file, env, keychain)', () => {
   let dir49;
@@ -18887,6 +18888,13 @@ describe('Suite 49 — token source chain (file, env, keychain)', () => {
       () => resolveAccountS49(cfg49({ token_file: joinS45(dir49, 'nope'), token_env: ENV49, token_keychain: 'svc-49f' }), 'anthropic', 't'),
       (e) => e.code === 'AUTH_MISSING' && e.message.includes('svc-49f') && e.message.includes(ENV49) && e.message.includes('nope'),
     );
+  });
+
+  it('49h: keychain helper env uses the home from the user database, not a redirected HOME', () => {
+    const env = keychainEnv({ HOME: '/tmp/redirected-home', KEEP: 'x' });
+    assert.equal(env.HOME, userInfoS49().homedir);
+    assert.notEqual(env.HOME, '/tmp/redirected-home');
+    assert.equal(env.KEEP, 'x');
   });
 
   it('49g: a throwing keychain reader is treated as empty, not as a crash', () => {
