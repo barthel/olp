@@ -51,7 +51,7 @@ import {
   DEFAULT_MAX_CONCURRENT_SPAWNS,
 } from './lib/providers/index.mjs';
 import { ProviderError } from './lib/providers/base.mjs';
-import { resolveAccountDir } from './lib/accounts.mjs';
+import { resolveAccount } from './lib/accounts.mjs';
 import { computeCacheKey, hasCacheControl, extractCacheControlMarkers } from './lib/cache/keys.mjs';
 import { CacheStore } from './lib/cache/store.mjs';
 import {
@@ -1357,14 +1357,15 @@ async function handleChatCompletions(req, res) {
       // here because the try/finally below has not been entered yet.
       let hopIsolationCtx;
       try {
-        const hopAccountDir = hopAccount
-          ? resolveAccountDir(_fallbackConfig, hopProvider, hopAccount)
+        const hopAccountCred = hopAccount
+          ? resolveAccount(_fallbackConfig, hopProvider, hopAccount)
           : null;
         hopIsolationCtx = await prepareIsolatedEnvironment({
           provider: hopProviderPlugin,
           keyId,
           reqId: requestId,
-          accountDir: hopAccountDir,
+          accountDir: hopAccountCred?.dir ?? null,
+          accountToken: hopAccountCred?.token ?? null,
         });
       } catch (isolationErr) {
         releaseSpawn(hopSpawnKey);

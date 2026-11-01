@@ -18742,3 +18742,94 @@ describe('Suite 47 — account-aware auth preflight and spawn env', () => {
     }
   });
 });
+
+// ── Suite 48 — token_file accounts (issue #75, PR 1; claude setup-token) ────
+import { resolveAccount as resolveAccountS48 } from './lib/accounts.mjs';
+import { existsSync as existsSyncS48 } from 'node:fs';
+
+describe('Suite 48 — token_file accounts', () => {
+  let dir48;
+
+  before(() => { dir48 = mkdtempS45(joinS45(tmpdirS45(), 'olp-s48-')); });
+  afterEach(() => { __resetSpawnImpl(); delete process.env.CLAUDE_CODE_OAUTH_TOKEN; });
+  after(() => { rmS45(dir48, { recursive: true, force: true }); });
+
+  const cfg48 = (entry) => ({ accounts: { anthropic: { t: entry } } });
+
+  it('48a: extractAccounts keeps token_file entries and drops entries with neither dir nor token_file', () => {
+    const out = extractAccounts({ anthropic: { accounts: { a: { token_file: '/x/tok' }, b: { foo: 1 }, c: { dir: '/x/c' } } } });
+    assert.deepEqual(out, { anthropic: { a: { token_file: '/x/tok' }, c: { dir: '/x/c' } } });
+  });
+
+  it('48b: resolveAccount reads the token from the file (trimmed) on every call', () => {
+    const f = joinS45(dir48, 'tok-b');
+    writeS45(f, 'sk-ant-oat01-first\n');
+    assert.deepEqual(resolveAccountS48(cfg48({ token_file: f }), 'anthropic', 't'), { token: 'sk-ant-oat01-first' });
+    writeS45(f, 'sk-ant-oat01-second\n');
+    assert.deepEqual(resolveAccountS48(cfg48({ token_file: f }), 'anthropic', 't'), { token: 'sk-ant-oat01-second' });
+    assert.deepEqual(resolveAccountS48(cfg48({ dir: '/abs/d' }), 'anthropic', 't'), { dir: '/abs/d' });
+  });
+
+  it('48c: resolveAccount fails AUTH_MISSING for missing, empty, relative token_file and unknown account', () => {
+    const empty = joinS45(dir48, 'tok-empty');
+    writeS45(empty, '  \n');
+    for (const entry of [{ token_file: joinS45(dir48, 'nope') }, { token_file: empty }, { token_file: 'rel/tok' }]) {
+      assert.throws(() => resolveAccountS48(cfg48(entry), 'anthropic', 't'), (e) => e.code === 'AUTH_MISSING');
+    }
+    assert.throws(() => resolveAccountS48({ accounts: {} }, 'anthropic', 'zzz'), (e) => e.code === 'AUTH_MISSING');
+  });
+
+  it('48d: prepareIsolatedEnvironment puts the token into envOverrides and mounts no credential file', async () => {
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let ctx;
+    const defaultCred = joinS45(dir48, 'default-cred-48d.json');
+    writeS45(defaultCred, 'default-login');
+    try {
+      ctx = await prepareIsolatedEnvironment({
+        provider: {
+          name: 'anthropic',
+          ISOLATION: {
+            ...anthropicIsolationS45,
+            credentialMounts: [[defaultCred, '.claude/.credentials.json']],
+          },
+        },
+        keyId: 'k48d', reqId: 'r48d', accountToken: 'tok-48d',
+      });
+      assert.equal(ctx.envOverrides.CLAUDE_CODE_OAUTH_TOKEN, 'tok-48d');
+      assert.equal(existsSyncS48(joinS45(ctx.ephemeralRoot, '.claude', '.credentials.json')), false,
+        'default login credentials must not be mounted for a token account');
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      if (ctx) await ctx.cleanup();
+    }
+  });
+
+  it('48e: prepareIsolatedEnvironment rejects a token account for a provider without accountTokenEnv', async () => {
+    for (const provider of [{ name: 'codex', ISOLATION: codexIsolationS45 }, { name: 'mistral' }]) {
+      await assert.rejects(
+        () => prepareIsolatedEnvironment({ provider, keyId: 'k48e', reqId: 'r48e', accountToken: 't' }),
+        (e) => e.code === 'AUTH_MISSING',
+      );
+    }
+  });
+
+  it('48f: anthropic spawn with a token account hands exactly that token to the CLI, not the process-wide one', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'process-wide';
+    const sink = [];
+    const inner = makeMockSpawnNDJSON(['ok']);
+    __setSpawnImpl((bin, args, opts) => { sink.push(opts.env); return inner(bin, args, opts); });
+    const ir = makeIR({ model: 'claude-sonnet-4-6', stream: false, messages: [{ role: 'user', content: 'Hi' }] });
+    for await (const _c of anthropic.spawn(ir, null, { accountToken: 'tok-48f', envOverrides: { CLAUDE_CODE_OAUTH_TOKEN: 'tok-48f' } })) { /* drain */ }
+    assert.equal(sink[0].CLAUDE_CODE_OAUTH_TOKEN, 'tok-48f');
+  });
+
+  it('48g: a token account spawn without envOverrides forwards no token at all (no process-wide leak)', async () => {
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'process-wide';
+    const sink = [];
+    const inner = makeMockSpawnNDJSON(['ok']);
+    __setSpawnImpl((bin, args, opts) => { sink.push(opts.env); return inner(bin, args, opts); });
+    const ir = makeIR({ model: 'claude-sonnet-4-6', stream: false, messages: [{ role: 'user', content: 'Hi' }] });
+    for await (const _c of anthropic.spawn(ir, null, { accountToken: 'tok-48g', envOverrides: {} })) { /* drain */ }
+    assert.equal(sink[0].CLAUDE_CODE_OAUTH_TOKEN, undefined);
+  });
+});
