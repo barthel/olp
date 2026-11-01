@@ -106,6 +106,7 @@ const PORT = parseInt(process.env.OLP_PORT ?? '4567', 10);
 //   - 0.0.0.0: ALL interfaces — operator MUST ensure auth posture matches the
 //     network reachability (e.g. no advertise_anonymous_key on public IP)
 const BIND = process.env.OLP_BIND ?? '127.0.0.1';
+const _BIND_IS_LOOPBACK = BIND === '127.0.0.1' || BIND === 'localhost' || BIND === '::1';
 const BODY_LIMIT = 5 * 1024 * 1024; // 5 MB
 
 // ── Logging ───────────────────────────────────────────────────────────────
@@ -2145,7 +2146,14 @@ async function _runOwnerOnlyManagementEndpoint(req, res, method, path, inner) {
   // Step 2: owner-only_block. ADR 0008 §8 says management endpoints REJECT
   // non-owner identities outright (vs /health's trim model). Anonymous +
   // guest both produce 401 here.
-  if (olpIdentity.owner_tier !== 'owner') {
+  // Opt-in exception (auth.anonymous_management): anonymous identities may
+  // use the management endpoints, but only with allow_anonymous=true and a
+  // loopback bind. Guests and invalid keys stay blocked.
+  const anonymousManagement = olpIdentity.owner_tier === 'anonymous'
+    && _authConfig.anonymous_management === true
+    && _authConfig.allow_anonymous === true
+    && _BIND_IS_LOOPBACK;
+  if (olpIdentity.owner_tier !== 'owner' && !anonymousManagement) {
     auditCtx.error_code = 'owner_required';
     return sendError(res, 401,
       'OLP owner-tier identity required for this management endpoint.',

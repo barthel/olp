@@ -11661,6 +11661,71 @@ describe('Suite 24 — D50 management endpoints (Phase 3, ADR 0008 §§ 7-8)', (
     });
   });
 
+  describe('24h-k — auth.anonymous_management opt-in (loopback bind)', () => {
+    let TMP, server, port;
+    const cfg = (extra = {}) => ({ allow_anonymous: true, owner_only_endpoints: [], fallback_detail_header_policy: 'all', ...extra });
+    before(async () => {
+      TMP = _mkdtempSyncForSetup(_pathJoinForSetup(_tmpdirForSetup(), 'olp-test-24hk-'));
+      process.env.OLP_HOME = TMP;
+      __setAuthConfig(cfg());
+      ({ server, port } = await makeSuite24Server());
+    });
+    after(async () => {
+      await teardownSuite24(server);
+      process.env.OLP_HOME = GLOBAL_OLP_HOME;
+      __setAuthConfig(cfg());
+      rmSync(TMP, { recursive: true, force: true });
+    });
+
+    it('24h: anonymous_management true + allow_anonymous true → anonymous GET /dashboard and /v0/management/quota return 200', async () => {
+      __setAuthConfig(cfg({ anonymous_management: true }));
+      try {
+        const d = await fetch({ port, method: 'GET', path: '/dashboard' });
+        assert.equal(d.status, 200);
+        assert.match(d.body, /OLP Dashboard/i);
+        const q = await fetch({ port, method: 'GET', path: '/v0/management/quota' });
+        assert.equal(q.status, 200);
+      } finally {
+        __setAuthConfig(cfg());
+      }
+    });
+
+    it('24i: anonymous_management absent or false → anonymous stays 401 owner_required', async () => {
+      for (const extra of [{}, { anonymous_management: false }]) {
+        __setAuthConfig(cfg(extra));
+        const r = await fetch({ port, method: 'GET', path: '/dashboard' });
+        assert.equal(r.status, 401);
+        assert.equal(JSON.parse(r.body).error.type, 'owner_required');
+      }
+    });
+
+    it('24j: anonymous_management true + allow_anonymous false → 401 auth_required (flag alone opens nothing)', async () => {
+      __setAuthConfig(cfg({ anonymous_management: true, allow_anonymous: false }));
+      try {
+        const r = await fetch({ port, method: 'GET', path: '/dashboard' });
+        assert.equal(r.status, 401);
+        assert.equal(JSON.parse(r.body).error.type, 'auth_required');
+      } finally {
+        __setAuthConfig(cfg());
+      }
+    });
+
+    it('24k: anonymous_management true does not open the endpoints for a guest key', async () => {
+      __setAuthConfig(cfg({ anonymous_management: true }));
+      try {
+        const { plaintext_token } = createKey({ name: '24k-guest', owner_tier: 'guest', providers_enabled: '*', olpHome: TMP });
+        const r = await fetch({
+          port, method: 'GET', path: '/dashboard',
+          headers: { Authorization: `Bearer ${plaintext_token}` },
+        });
+        assert.equal(r.status, 401);
+        assert.equal(JSON.parse(r.body).error.type, 'owner_required');
+      } finally {
+        __setAuthConfig(cfg());
+      }
+    });
+  });
+
   describe('24e-g — /v0/management/dashboard-data + /v0/management/quota', () => {
     let TMP, server, port;
     before(async () => {
