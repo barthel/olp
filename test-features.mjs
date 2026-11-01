@@ -18902,3 +18902,189 @@ describe('Suite 49 — token source chain (file, env, keychain)', () => {
     assert.throws(() => resolveAccountS49(cfg49({ token_keychain: 'svc' }), 'anthropic', 't'), (e) => e.code === 'AUTH_MISSING');
   });
 });
+
+// ── Suite 50 — per-account quota view (issue #75, PR 3) ─────────────────────
+import { aggregateProviderQuota as aggregateQuotaS50 } from './lib/audit-query.mjs';
+import { readFileSync as readFileS50 } from 'node:fs';
+
+describe('Suite 50 — quota probe and dashboard rows per account', () => {
+  let tmp50;
+  let mock50;
+  let seenTokens50;
+  const savedEnvToken50 = process.env.CLAUDE_CODE_OAUTH_TOKEN;
+  const savedOlpHome50 = process.env.OLP_HOME;
+
+  // Mock API: utilization depends on the bearer token so rows can be told apart.
+  const headersFor50 = (util5h, util7d) => ({
+    ..._ALL_13_HEADERS,
+    'anthropic-ratelimit-unified-5h-utilization': String(util5h),
+    'anthropic-ratelimit-unified-7d-utilization': String(util7d),
+    'anthropic-ratelimit-unified-5h-reset': '1748291111',
+    'anthropic-ratelimit-unified-7d-reset': '1748502222',
+  });
+
+  before(async () => {
+    tmp50 = mkdtempS45(joinS45(tmpdirS45(), 'olp-s50-'));
+    _writeProbeConfig(tmp50);
+    process.env.OLP_HOME = tmp50;
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = 'tok-default-50';
+    seenTokens50 = [];
+    mock50 = await _startMockServer((req, res) => {
+      const bearer = String(req.headers.authorization ?? '').replace(/^Bearer /, '');
+      seenTokens50.push(bearer);
+      req.resume();
+      if (bearer === 'tok-default-50') { res.writeHead(200, headersFor50(0.10, 0.20)); return res.end('{}'); }
+      if (bearer === 'tok-a-50') { res.writeHead(200, headersFor50(0.55, 0.65)); return res.end('{}'); }
+      if (bearer === 'tok-dir-50') { res.writeHead(200, headersFor50(0.77, 0.88)); return res.end('{}'); }
+      res.writeHead(401, {});
+      res.end('{}');
+    });
+    setQuotaUrls38(`${mock50.url}/v1/messages`, `${mock50.url}/v1/oauth/token`);
+  });
+
+  beforeEach(() => { resetQuotaStateOnly38(); seenTokens50.length = 0; });
+
+  after(async () => {
+    await mock50.close();
+    resetQuotaProbe38();
+    if (savedEnvToken50 === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN; else process.env.CLAUDE_CODE_OAUTH_TOKEN = savedEnvToken50;
+    if (savedOlpHome50 === undefined) delete process.env.OLP_HOME; else process.env.OLP_HOME = savedOlpHome50;
+    rmS45(tmp50, { recursive: true, force: true });
+  });
+
+  it('50a: an account is probed with its own token and keeps its own utilization', async () => {
+    const acc = await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } });
+    const def = await quotaStatus38(null);
+    assert.equal(acc.fields.utilization_5h, 0.55);
+    assert.equal(def.fields.utilization_5h, 0.10);
+    assert.deepEqual(seenTokens50, ['tok-a-50', 'tok-default-50']);
+  });
+
+  it('50b: a failing account does not put the default login or another account into backoff', async () => {
+    const bad = await quotaStatus38({ account: 'bad', credential: { token: 'tok-bad-50' } });
+    assert.equal(bad.probe_status, 'unreachable');
+    assert.equal(bad.failure.kind, 'auth_failed');
+    const good = await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } });
+    const def = await quotaStatus38(null);
+    assert.equal(good.probe_status, 'live');
+    assert.equal(def.probe_status, 'live');
+    const again = await quotaStatus38({ account: 'bad', credential: { token: 'tok-bad-50' } });
+    assert.equal(again.probe_status, 'unreachable');
+    assert.equal(seenTokens50.filter((t) => t === 'tok-bad-50').length, 1, 'backoff must prevent a second probe of the bad account');
+  });
+
+  it('50c: the second call of an account is served from its cache', async () => {
+    await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } });
+    await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } });
+    assert.equal(seenTokens50.length, 1);
+  });
+
+  it('50d: a dir account reads the token from its .credentials.json', async () => {
+    const d = joinS45(tmp50, 'acct-dir');
+    _mkdirSync38(d, { recursive: true });
+    writeS45(joinS45(d, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'tok-dir-50' } }));
+    const r = await quotaStatus38({ account: 'dirtest', credential: { dir: d } });
+    assert.equal(r.fields.utilization_7d, 0.88);
+    assert.deepEqual(seenTokens50, ['tok-dir-50']);
+  });
+
+  it('50e: an account without usable credentials is unreachable with no_credentials', async () => {
+    const r = await quotaStatus38({ account: 'empty', credential: { dir: joinS45(tmp50, 'does-not-exist') } });
+    assert.equal(r.probe_status, 'unreachable');
+    assert.equal(r.failure.kind, 'no_credentials');
+    assert.equal(seenTokens50.length, 0);
+  });
+
+  it('50f: with quota_probe_enabled off, an account call returns null and sends nothing', async () => {
+    writeS45(joinS45(tmp50, 'config.json'), JSON.stringify({ providers: { anthropic: { quota_probe_enabled: false } } }));
+    try {
+      assert.equal(await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } }), null);
+      assert.equal(seenTokens50.length, 0);
+    } finally {
+      _writeProbeConfig(tmp50);
+    }
+  });
+
+  it('50g: the probe result never contains the token', async () => {
+    const r = await quotaStatus38({ account: 'a', credential: { token: 'tok-a-50' } });
+    const bad = await quotaStatus38({ account: 'bad', credential: { token: 'tok-bad-50' } });
+    assert.ok(!JSON.stringify(r).includes('tok-a-50'));
+    assert.ok(!JSON.stringify(bad).includes('tok-bad-50'));
+  });
+
+  it('50h: aggregateProviderQuota adds one row per configured account next to the default row', async () => {
+    const plugin = { quotaStatus: (ctx) => quotaStatus38(ctx) };
+    const rows = await aggregateQuotaS50({
+      providers: new Map([['anthropic', plugin]]),
+      accounts: { anthropic: { a: { token_file: '/x' }, dirtest: { dir: '/y' } } },
+      resolveCredential: (p, a) => (a === 'a' ? { token: 'tok-a-50' } : { token: 'tok-dir-50' }),
+    });
+    assert.deepEqual(rows.map((r) => [r.provider, r.account, r.status]), [
+      ['anthropic', null, 'live'], ['anthropic', 'a', 'live'], ['anthropic', 'dirtest', 'live'],
+    ]);
+    assert.equal(rows[0].utilization['5h'], 0.10);
+    assert.equal(rows[1].utilization['5h'], 0.55);
+    assert.equal(rows[2].utilization['5h'], 0.77);
+    assert.equal(rows[1].reset['5h'], 1748291111);
+    assert.equal(rows[1].reset['7d'], 1748502222);
+  });
+
+  it('50i: an account whose credential cannot be resolved becomes an unavailable row, other rows stay intact', async () => {
+    const plugin = { quotaStatus: (ctx) => quotaStatus38(ctx) };
+    const rows = await aggregateQuotaS50({
+      providers: new Map([['anthropic', plugin]]),
+      accounts: { anthropic: { broken: { token_file: '/x' }, a: { token_file: '/y' } } },
+      resolveCredential: (p, a) => {
+        if (a === 'broken') throw new Error('Account "broken" has no token source with a value');
+        return { token: 'tok-a-50' };
+      },
+    });
+    const broken = rows.find((r) => r.account === 'broken');
+    assert.equal(broken.status, 'unavailable');
+    assert.match(broken.reason, /no token source/);
+    assert.equal(rows.find((r) => r.account === 'a').status, 'live');
+    assert.equal(rows.find((r) => r.account === null).status, 'live');
+  });
+
+  it('50j: providers without accounts yield exactly the old single row with account null', async () => {
+    const rows = await aggregateQuotaS50({ providers: new Map([['codex', { quotaStatus: async () => null }]]) });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].account, null);
+    assert.equal(rows[0].status, 'unavailable');
+  });
+
+  it('50k: renderPlanUsage shows account tags: named accounts, and "default" only for providers that have accounts', async () => {
+    const { runInNewContext } = await import('node:vm');
+    const html = readFileS50(new URL('./dashboard.html', import.meta.url), 'utf8');
+    const from = html.indexOf('function el(tag');
+    const to = html.indexOf('/* ─────────────── Legacy quota renderer');
+    assert.ok(from > 0 && to > from, 'renderer block located');
+    const code = html.slice(from, to) + '\nrenderPlanUsage(rows);';
+    const mk = (tag) => ({
+      tag, children: [], className: '', style: {}, attrs: {},
+      setAttribute(k, v) { this.attrs[k] = v; },
+      addEventListener() {},
+      appendChild(c) { this.children.push(c); return c; },
+      set innerHTML(_v) { this.children = []; },
+    });
+    const text = (n) => (n.text !== undefined ? n.text : n.children.map(text).join(' '));
+    const render = (rows) => {
+      const target = mk('div');
+      const document = {
+        createElement: mk,
+        createTextNode: (t) => ({ text: String(t), children: [] }),
+        createDocumentFragment: () => mk('frag'),
+        getElementById: () => target,
+      };
+      runInNewContext(code, { document, rows, Date });
+      return target.children[0].children.map((row) => text(row.children[0]));
+    };
+    const row = (provider, account) => ({ provider, account, status: 'unavailable', reason: 'x' });
+    const withAccounts = render([row('anthropic', null), row('anthropic', 'work'), row('codex', null)]);
+    assert.ok(/ANTHROPIC\s+default/.test(withAccounts[0]), 'default row is tagged: ' + withAccounts[0]);
+    assert.ok(/ANTHROPIC\s+work/.test(withAccounts[1]), 'account row shows its name: ' + withAccounts[1]);
+    assert.ok(!/default/.test(withAccounts[2]), 'provider without accounts keeps the old row: ' + withAccounts[2]);
+    const plain = render([row('anthropic', null)]);
+    assert.ok(!/default/.test(plain[0]), 'no tag when there are no accounts');
+  });
+});

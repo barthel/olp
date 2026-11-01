@@ -2203,7 +2203,11 @@ async function handleManagementDashboardData(req, res) {
       // Authority: ADR 0008 Amendment (D81) + ADR 0012 D81 + ADR 0013 Rule 5.
       let quota_v2 = [];
       try {
-        quota_v2 = await auditAggregateProviderQuota({ providers: loadedProviders });
+        quota_v2 = await auditAggregateProviderQuota({
+          providers: loadedProviders,
+          accounts: _fallbackConfig?.accounts ?? {},
+          resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
+        });
       } catch (err) {
         // Graceful degradation: quota_v2 is optional enrichment; don't fail entire payload.
         logEvent('warn', 'dashboard_data_quota_v2_failed', { error: err?.message ?? String(err) });
@@ -2245,7 +2249,11 @@ async function handleManagementQuota(req, res) {
       // quota_v2 (D81): normalized per-provider quota shape per ADR 0008 Amendment (D81).
       let quota_v2 = [];
       try {
-        quota_v2 = await auditAggregateProviderQuota({ providers: loadedProviders });
+        quota_v2 = await auditAggregateProviderQuota({
+          providers: loadedProviders,
+          accounts: _fallbackConfig?.accounts ?? {},
+          resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
+        });
       } catch (err) {
         logEvent('warn', 'management_quota_v2_failed', { error: err?.message ?? String(err) });
       }

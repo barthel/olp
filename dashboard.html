@@ -124,6 +124,16 @@
   .provider-badge.mistral   { background: #6d5acd; }
   .provider-badge.openai    { background: #10a37f; }
   .provider-badge.default   { background: #6b7280; }
+  .account-tag {
+    display: inline-block;
+    padding: 0.15rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: #374151;
+    background: #e5e7eb;
+    border: 1px solid #d1d5db;
+  }
 
   .status-dot {
     display: inline-block;
@@ -425,6 +435,7 @@
     }
 
     const frag = document.createDocumentFragment();
+    const providersWithAccounts = new Set(quotaV2.filter((e) => e.account).map((e) => e.provider));
 
     for (const entry of quotaV2) {
       const status = entry.status || 'unavailable';
@@ -434,6 +445,11 @@
       const topBar = el('div', { class: 'provider-row-top' });
 
       topBar.appendChild(el('span', { class: 'provider-badge ' + providerBadgeClass(entry.provider) }, (entry.provider || '').toUpperCase()));
+      if (entry.account) {
+        topBar.appendChild(el('span', { class: 'account-tag', title: 'Account: ' + entry.account }, entry.account));
+      } else if (providersWithAccounts.has(entry.provider)) {
+        topBar.appendChild(el('span', { class: 'account-tag', title: 'Default login of this provider' }, 'default'));
+      }
       topBar.appendChild(el('span', { class: 'status-dot ' + status, title: 'Status: ' + status }));
       topBar.appendChild(el('span', { class: 'status-chip ' + status }, status));
 
