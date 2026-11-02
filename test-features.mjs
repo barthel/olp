@@ -19688,3 +19688,168 @@ describe('Suite 53 — limit reset from the quota snapshot', () => {
     assert.equal(events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_source, 'event');
   });
 });
+
+// ── Suite 54 — cool-down seeded at startup, active account per row (issue #75) ─
+import {
+  seedAccountCooldowns as seed54,
+  recordAccountServed as served54,
+  lastServedAccount as lastServed54,
+  accountCooldownUntil as coolUntil54,
+  __resetAccountCooldowns as reset54,
+} from './lib/fallback/cooldown.mjs';
+import { aggregateProviderQuota as aggregateQuota54 } from './lib/audit-query.mjs';
+
+describe('Suite 54 — startup seeding and account state', () => {
+  afterEach(() => reset54());
+
+  const accounts54 = { anthropic: { private: { token_keychain: 'x' }, iteratec: { token_keychain: 'y' } } };
+
+  it('54a: an account whose quota shows a future reset starts in cool-down until that reset', async () => {
+    const now = Date.now();
+    const resetsAtMs = now + 2 * 24 * 3600 * 1000;
+    const events = [];
+    const seeded = await seed54({
+      accounts: accounts54,
+      resolveReset: async (p, a) => (a === 'private' ? resetsAtMs : null),
+      logEvent: (l, ev, data) => events.push([ev, data]),
+      now,
+    });
+    assert.deepEqual(seeded.map((s) => s.account), ['private']);
+    assert.equal(coolUntil54('anthropic', 'private'), resetsAtMs);
+    assert.equal(coolUntil54('anthropic', 'iteratec'), null);
+    assert.equal(events.find(([n]) => n === 'account_cooldown_seeded')[1].account, 'private');
+  });
+
+  it('54b: a failing or empty lookup, and a reset in the past, leave the account alone', async () => {
+    const now = Date.now();
+    const seeded = await seed54({
+      accounts: accounts54,
+      resolveReset: async (p, a) => {
+        if (a === 'private') throw new Error('probe unreachable');
+        return now - 1000;
+      },
+      now,
+    });
+    assert.deepEqual(seeded, []);
+    assert.equal(coolUntil54('anthropic', 'private'), null);
+    assert.equal(coolUntil54('anthropic', 'iteratec'), null);
+  });
+
+  it('54c: a reset beyond eight days is capped, as for limit hits', async () => {
+    const now = Date.now();
+    await seed54({ accounts: { anthropic: { a: {} } }, resolveReset: async () => now + 30 * 24 * 3600 * 1000, now });
+    assert.equal(coolUntil54('anthropic', 'a'), now + 8 * 24 * 3600 * 1000);
+  });
+
+  it('54d: no accounts configured seeds nothing and does not call the lookup', async () => {
+    let called = 0;
+    const seeded = await seed54({ accounts: {}, resolveReset: async () => { called++; return Date.now() + 1000; } });
+    assert.deepEqual(seeded, []);
+    assert.equal(called, 0);
+  });
+
+  it('54e: recordAccountServed remembers the latest account per provider and ignores hops without account', () => {
+    assert.equal(lastServed54('anthropic'), null);
+    served54('anthropic', 'iteratec', 1000);
+    served54('anthropic', null, 2000);
+    served54('anthropic', '', 3000);
+    assert.deepEqual(lastServed54('anthropic'), { account: 'iteratec', at: 1000 });
+    served54('anthropic', 'private', 4000);
+    assert.equal(lastServed54('anthropic').account, 'private');
+    assert.equal(lastServed54('codex'), null);
+  });
+
+  it('54f: aggregateProviderQuota adds active and cooldown_until to account rows only', async () => {
+    const plugin = { quotaStatus: async () => null };
+    const rows = await aggregateQuota54({
+      providers: new Map([['anthropic', plugin]]),
+      accounts: accounts54,
+      resolveCredential: () => ({ token: 't' }),
+      accountState: (p, a) => (a === 'private' ? { active: false, cooldown_until: 1793804400000 } : { active: true, cooldown_until: null }),
+    });
+    const by = Object.fromEntries(rows.map((r) => [String(r.account), r]));
+    assert.equal(by.null.active, undefined);
+    assert.equal(by.null.cooldown_until, undefined);
+    assert.equal(by.private.active, false);
+    assert.equal(by.private.cooldown_until, 1793804400000);
+    assert.equal(by.iteratec.active, true);
+    assert.equal(by.iteratec.cooldown_until, null);
+  });
+
+  it('54g: a throwing accountState does not break the rows; without accountState rows stay unchanged', async () => {
+    const plugin = { quotaStatus: async () => null };
+    const base = { providers: new Map([['anthropic', plugin]]), accounts: accounts54, resolveCredential: () => ({ token: 't' }) };
+    const withThrow = await aggregateQuota54({ ...base, accountState: () => { throw new Error('boom'); } });
+    assert.equal(withThrow.find((r) => r.account === 'private').active, false);
+    const plain = await aggregateQuota54(base);
+    assert.equal(plain.find((r) => r.account === 'private').active, undefined);
+  });
+});
+
+describe('Suite 54 (server) — active account in /v0/management/quota', () => {
+  let TMP54, server54, port54, prevHome54;
+  const authCfg54 = { allow_anonymous: true, owner_only_endpoints: [], fallback_detail_header_policy: 'all' };
+  const rowsOf54 = async () => {
+    const r = await fetch({ port: port54, method: 'GET', path: '/v0/management/quota', headers: { Authorization: `Bearer ${tok54}` } });
+    assert.equal(r.status, 200);
+    return JSON.parse(r.body).quota_v2.filter((x) => x.provider === 'anthropic');
+  };
+  let tok54;
+
+  before(async () => {
+    TMP54 = _mkdtempSyncForSetup(_pathJoinForSetup(_tmpdirForSetup(), 'olp-test-54-'));
+    prevHome54 = process.env.OLP_HOME;
+    process.env.OLP_HOME = TMP54;
+    __setAuthConfig(authCfg54);
+    __setProvidersEnabled({ anthropic: true });
+    __setFallbackConfig({
+      chains: { m: [{ provider: 'anthropic', model: 'm', account: 'private' }, { provider: 'anthropic', model: 'm', account: 'iteratec' }] },
+      soft_triggers: {},
+      accounts: { anthropic: { private: { token_file: '/nonexistent/p' }, iteratec: { token_file: '/nonexistent/i' } } },
+    });
+    tok54 = createKey({ name: '54-owner', owner_tier: 'owner', providers_enabled: '*', olpHome: TMP54 }).plaintext_token;
+    server54 = createOlpServer();
+    port54 = await new Promise((resolve) => server54.listen(0, '127.0.0.1', () => resolve(server54.address().port)));
+  });
+  after(async () => {
+    await new Promise((resolve) => server54.close(resolve));
+    __resetFallbackConfig();
+    __setProvidersEnabled({});
+    __setAuthConfig(authCfg54);
+    if (prevHome54 === undefined) delete process.env.OLP_HOME; else process.env.OLP_HOME = prevHome54;
+    rmSync(TMP54, { recursive: true, force: true });
+    reset54();
+  });
+
+  it('54h: the first configured account is active until another one served a request', async () => {
+    reset54();
+    const rows = await rowsOf54();
+    assert.equal(rows.find((r) => r.account === 'private').active, true);
+    assert.equal(rows.find((r) => r.account === 'iteratec').active, false);
+    served54('anthropic', 'iteratec');
+    const after = await rowsOf54();
+    assert.equal(after.find((r) => r.account === 'iteratec').active, true);
+    assert.equal(after.find((r) => r.account === 'private').active, false);
+  });
+
+  it('54i: a cooling account is never active and reports cooldown_until; the next free account takes over', async () => {
+    reset54();
+    served54('anthropic', 'private');
+    const until = Date.now() + 3600_000;
+    markCool51('anthropic', 'private', 3600_000);
+    const rows = await rowsOf54();
+    const priv = rows.find((r) => r.account === 'private');
+    assert.equal(priv.active, false);
+    assert.ok(Math.abs(priv.cooldown_until - until) < 2000);
+    assert.equal(rows.find((r) => r.account === 'iteratec').active, true);
+    assert.equal(rows.find((r) => r.account === 'iteratec').cooldown_until, null);
+  });
+
+  it('54j: with every account cooling down no row is active', async () => {
+    reset54();
+    markCool51('anthropic', 'private', 3600_000);
+    markCool51('anthropic', 'iteratec', 3600_000);
+    const rows = await rowsOf54();
+    assert.deepEqual(rows.filter((r) => r.account !== null).map((r) => r.active), [false, false]);
+  });
+});

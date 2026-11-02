@@ -53,6 +53,12 @@ import {
 import { ProviderError } from './lib/providers/base.mjs';
 import { resolveAccount } from './lib/accounts.mjs';
 import { anthropicLimitResetFromQuota } from './lib/providers/anthropic.mjs';
+import {
+  seedAccountCooldowns,
+  recordAccountServed,
+  lastServedAccount,
+  accountCooldownUntil,
+} from './lib/fallback/cooldown.mjs';
 import { computeCacheKey, hasCacheControl, extractCacheControlMarkers } from './lib/cache/keys.mjs';
 import { CacheStore } from './lib/cache/store.mjs';
 import {
@@ -426,6 +432,24 @@ export function __resetFallbackConfig() {
 // failure yields null, so the engine keeps its fixed cool-down. The probe
 // result is cached by the plugin (5 min), so this adds at most one request
 // per account and window.
+// Account that serves the next request of a provider: the one that served the
+// latest request while it is not cooling down, else the first configured
+// account without a cool-down (config order). Chains of single models may
+// order accounts differently; this is the provider-level view for displays.
+function _activeAccount(provider) {
+  const names = Object.keys(_fallbackConfig?.accounts?.[provider] ?? {});
+  const last = lastServedAccount(provider)?.account;
+  if (last && names.includes(last) && accountCooldownUntil(provider, last) === null) return last;
+  return names.find((n) => accountCooldownUntil(provider, n) === null) ?? null;
+}
+
+function _accountRowState(provider, account) {
+  return {
+    active: _activeAccount(provider) === account,
+    cooldown_until: accountCooldownUntil(provider, account),
+  };
+}
+
 async function _resolveAccountLimitReset(provider, account, err) {
   if (provider !== 'anthropic') return null;
   const plugin = loadedProviders.get(provider);
@@ -2062,7 +2086,10 @@ async function handleChatCompletions(req, res) {
   // Audit ctx capture for success path (audit fires on res.on('finish');
   // status_code + latency_ms populated then).
   auditCtx.provider = providerUsed;
-  if (accountUsed) auditCtx.account = accountUsed;
+  if (accountUsed) {
+    auditCtx.account = accountUsed;
+    recordAccountServed(providerUsed, accountUsed);
+  }
   auditCtx.fallback_hops = fallbackHops;
   auditCtx.tried_providers = (Array.isArray(fallbackDetail) ? fallbackDetail.map(t => t?.provider).filter(Boolean) : []).concat([providerUsed]);
   auditCtx.cache_status = cacheStatus;
@@ -2234,6 +2261,7 @@ async function handleManagementDashboardData(req, res) {
           providers: loadedProviders,
           accounts: _fallbackConfig?.accounts ?? {},
           chains: _fallbackConfig?.chains,
+          accountState: _accountRowState,
           resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
         });
       } catch (err) {
@@ -2281,6 +2309,7 @@ async function handleManagementQuota(req, res) {
           providers: loadedProviders,
           accounts: _fallbackConfig?.accounts ?? {},
           chains: _fallbackConfig?.chains,
+          accountState: _accountRowState,
           resolveCredential: (p, a) => resolveAccount(_fallbackConfig, p, a),
         });
       } catch (err) {
@@ -2497,5 +2526,14 @@ if (isMain) {
     process.stdout.write(
       `OLP v${VERSION} listening on :${PORT} (${enabledCount} providers enabled)\n`,
     );
+    // Accounts whose quota already shows a hit limit start in cool-down, so
+    // the first request after a restart does not spend a failing spawn on
+    // them. Runs in the background; a request that arrives earlier is served
+    // as before (the limit hit then sets the cool-down itself).
+    seedAccountCooldowns({
+      accounts: _fallbackConfig?.accounts ?? {},
+      resolveReset: (provider, account) => _resolveAccountLimitReset(provider, account, null),
+      logEvent,
+    }).catch((e) => logEvent('warn', 'account_cooldown_seed_failed', { error: e?.message ?? String(e) }));
   });
 }
