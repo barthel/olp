@@ -15330,6 +15330,16 @@ describe('Suite 36 — D74 v0.4.1 hotfix regression (maintainer review findings)
       type: 'turn.completed',
       usage: { input_tokens: 12, output_tokens: 7 },
     }));
+    // Usage is forwarded to the IR stop chunk (OpenAI chat.completion.chunk usage shape).
+    assert.deepEqual(result, {
+      type: 'stop',
+      finish_reason: 'stop',
+      usage: { prompt_tokens: 12, completion_tokens: 7, total_tokens: 19 },
+    });
+  });
+
+  it('36n-2 — codexChunkToIR turn.completed without usage → stop without usage', () => {
+    const result = codexChunkToIR(JSON.stringify({ type: 'turn.completed' }));
     assert.deepEqual(result, { type: 'stop', finish_reason: 'stop' });
   });
 
@@ -17647,6 +17657,20 @@ describe('Suite 41 — ADR 0009 Amendment 1: stream-json transport (Phase 6)', (
     assert.ok(chunk !== null, 'result/success must yield an IR stop chunk');
     assert.equal(chunk.type, 'stop', 'IR chunk type must be "stop"');
     assert.equal(chunk.finish_reason, 'stop', 'finish_reason must be "stop"');
+  });
+
+  it('41e-3b: anthropicStreamJsonEventToIR — result usage → stop chunk usage (cache tokens count as prompt)', () => {
+    const event = {
+      type: 'result', subtype: 'success', is_error: false, result: 'hello',
+      usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 5, output_tokens: 7 },
+    };
+    const chunk = anthropicStreamJsonEventToIR(event, false);
+    assert.deepEqual(chunk.usage, { prompt_tokens: 125, completion_tokens: 7, total_tokens: 132 });
+  });
+
+  it('41e-3c: anthropicStreamJsonEventToIR — result without usage → no usage field', () => {
+    const chunk = anthropicStreamJsonEventToIR({ type: 'result', subtype: 'success', is_error: false }, false);
+    assert.equal(chunk.usage, undefined);
   });
 
   it('41e-4: anthropicStreamJsonEventToIR — result is_error → throws ProviderError', () => {
