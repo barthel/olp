@@ -307,3 +307,45 @@ Two requests against PI231 v2.1.104 on 2026-05-27 with identical user prompt `"r
 - **P0 billing classification spike — 2026-05-27** subagent transcript; sources include Anthropic published docs at `code.claude.com/docs/en/headless`, `support.claude.com/en/articles/15036540`, `support.claude.com/en/articles/11145838`.
 - **claude CLI v2.1.104 `--help`** (live capture on PI231) § `--output-format`, § `--verbose`, § `--system-prompt`, § `--no-session-persistence`.
 - **CLAUDE.md `release_kit.phase_rolling_mode.current_phase`** — Phase 6; this ADR consumes a Phase 6 D-day per the amendment, NOT a Phase 4 D-day (the placeholder's hypothetical scheduling).
+
+
+## Amendment 2 — 2026-11-02: Client tool calls through an MCP stub (anthropic)
+
+### Trigger
+
+Agentic OpenAI-compatible clients (Mistral Vibe with `claude-*` models behind OLP) send `tools[]` and expect `tool_calls` back; they execute the tools themselves. The anthropic plugin dropped `tools[]` (header comment: "Request-level `tools[]` — stream-json mode does not consume structured tool defs on the wire"), so the model never saw the client's tools and always answered in prose.
+
+### Spike result
+
+`docs/spikes/2026-11-02-client-tool-bridge.md` shows, on claude CLI 2.1.304: external tools can be registered per spawn through `--mcp-config` (inline JSON allowed) with `--strict-mcp-config`; the model's call is reported on stdout as an `assistant` event with a `tool_use` block before any result exists; parallel calls are separate `assistant` events of one `message.id`; replaying `tool_use`/`tool_result` through `--input-format stream-json` is ignored, text in the prompt works. This is a documented CLI surface (`claude --help` § `--mcp-config`, `--strict-mcp-config`, `--tools`, `--allowedTools`), so ALIGNMENT Rule 2 is respected: nothing is invented, and OLP still does not execute tools.
+
+### Decision
+
+When the IR request has a non-empty `tools[]` (and `tool_choice` is not `"none"`), `anthropic.mjs` adds to the spawn args:
+
+- `--mcp-config <inline JSON>` registering one stdio server `olp` that runs `process.execPath lib/providers/anthropic-tool-stub.mjs`, the tool list passed as a base64 JSON argument;
+- `--strict-mcp-config`, `--tools ""` and `--allowedTools mcp__olp__*`.
+
+The stub answers `initialize` and `tools/list` and **never answers `tools/call`**. OLP reads the event stream; on the first `tool_use` it collects further `tool_use` blocks of the same `message.id` until `hints.toolCallIdleMs` (default 400) of silence or any other event, then sends SIGTERM to the CLI and yields one delta chunk with all `tool_calls` (prefix `mcp__olp__` removed) followed by a stop chunk with `finish_reason: "tool_calls"`. No `result` event arrives, so the stop chunk has no usage; `stream_options.include_usage` falls back to the estimate.
+
+Details:
+
+1. **Names.** MCP tool names are limited to `[a-zA-Z0-9_-]{1,64}`. OLP maps each client name to a sanitized, unique name per request and maps back when emitting `tool_calls`.
+2. **`tool_choice`.** `"none"`: no bridge. `"required"` or a named function: a sentence is appended to the system prompt asking for a call (the CLI has no flag; lossy, documented).
+3. **Follow-up turn.** Stays text in the prompt: assistant `tool_calls` render as `[Assistant tool call <name> <arguments>]`, `role: tool` messages as `[Tool Result <name>] <content>`, the name resolved from `tool_call_id`.
+4. **Calls and ids.** The `tool_use` ids from the CLI are returned to the client unchanged.
+5. **Layer 3 isolation (ADR 0014).** When the spawn is wrapped by sandbox-runtime, whether the stub can start there is unverified. In that case the bridge is skipped, `tools[]` is dropped as before and `tools_dropped` is logged.
+6. **Cache and chain.** ADR 0005 Amendment 9, ADR 0004 Amendment 7.
+7. **Declaration.** `hints.supportsClientTools: true` (ADR 0002 Amendment 10).
+
+### Caveats
+
+- The idle window is a heuristic: OLP cannot know that no further `tool_use` event follows.
+- The follow-up is text. Quality over long agent sessions is not measured.
+- The README statement "OLP is not a tool runtime" stays true: tools run on the client.
+
+### Authority citations
+
+- claude CLI 2.1.304 `--help` § `--mcp-config`, `--strict-mcp-config`, `--tools`, `--allowedTools`, `--output-format stream-json`.
+- `docs/spikes/2026-11-02-client-tool-bridge.md` (observed event order, tool-use ids, parallel calls, replay behaviour).
+- OpenAI tool-calling flow: client executes tools (https://platform.openai.com/docs/guides/function-calling).

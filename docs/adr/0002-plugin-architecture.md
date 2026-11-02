@@ -678,3 +678,11 @@ The full test list is captured in ADR 0014 Amendment 1's PR-B-revised test suite
 - **`ALIGNMENT.md` Rule 2 (No Invention)** — no invented env vars, no invented CLI flags. The mistral `crossTenantReadProtection: 'none'` declaration is the explicit honest acknowledgment that no protection regime has been established, rather than invention of one.
 - **`ALIGNMENT.md` Rule 4 (Unalignable Plugins / Fields Are Deleted)** — see § Rule 4 compliance above for the explicit reasoning that OPTIONAL `ISOLATION` is not "feature-flagging" but rather "honestly transitional."
 - **`ALIGNMENT.md` Amendment Procedure** — this section (Amendment 9) is the PR-required citation of evidence (the 2026-05-27 incident memory, the ADR 0014 PoC spike report at `/tmp/sandbox-spike/report.md` on PI231) and the structural amendment of the Provider contract documented in this ADR's § Decision.
+
+
+### Amendment 10 — 2026-11-02: Add OPTIONAL `hints.supportsClientTools` to the Provider contract
+
+- **Finding:** The Provider contract has no way to say whether a plugin can pass an OpenAI `tools[]` list to the model and return its tool calls. Today every plugin drops `tools[]` (lossy fields in the header comments of `anthropic.mjs`, `codex.mjs`, `mistral.mjs`). ADR 0009 Amendment 2 adds a bridge for anthropic only; the server needs to know which hops can serve it.
+- **Change:** `hints.supportsClientTools: boolean (optional, default false)` and `hints.toolCallIdleMs: positive integer (optional, default 400; only read when `supportsClientTools` is true)`, the idle window of the tool-call collector in ADR 0009 Amendment 2. `validateProvider` rejects a wrong type for either. Only `anthropic` declares `true`. The field is consumed by the server to log `tools_dropped` (ADR 0004 Amendment 7); it does not change chain building.
+- **Why a hint and not a method:** The capability is static per plugin, like `cacheable`. No `contractVersion` bump, because the field is optional with a backward-compatible default (same reasoning as Amendment 3).
+- **Authority:** ADR 0003 Amendment 4; evidence in `docs/spikes/2026-11-02-client-tool-bridge.md`.

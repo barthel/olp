@@ -7,6 +7,14 @@
 
 ## Amendments
 
+### Amendment 7 — 2026-11-02: Requests with `tools[]` do not filter the fallback chain
+
+- **Finding:** Only the anthropic plugin will be able to hand client tools to the model (ADR 0002 Amendment 10 `hints.supportsClientTools`); codex and mistral drop `tools[]` as documented in their header comments. A request with `tools[]` can therefore reach a hop that ignores them.
+- **Decision:** The chain is **not** filtered by tool support. A hop without `supportsClientTools` stays eligible and behaves as before (tools dropped, text answer). The server logs `tools_dropped` with the provider name when it spawns such a hop for a request that carries `tools[]`, so the situation is visible in the log.
+- **Why not skip those hops or answer 400:** Chat-only clients send `tools[]` with every request and are served by text answers today (README § Known limitations lists Hermes, Cline, Continue). Filtering would turn a working fallback into a hard failure for them. An agentic client that needs real tool calls pins its chain to anthropic via `providers_enabled` or the routing config.
+- **Re-evaluation trigger:** A client reports a silent degradation (tool-expecting agent receives a prose answer after a fallback hop). Then a per-request strict mode is a new amendment.
+- **Authority:** ADR 0002 Amendment 10; evidence in `docs/spikes/2026-11-02-client-tool-bridge.md` (only the claude CLI exposes a way to register external tools).
+
 ### Amendment 6 — 2026-05-24: `X-OLP-Provider-Used` chain-origin semantics on exhaustion (D41, issue #8)
 
 - **Finding:** On a chain-exhausted response, `executeWithFallback` returns `providerUsed: chain[0].provider` (the configured primary). At v0.1 this is always equivalent to "the first provider whose plugin spawned" because soft triggers are deferred per Amendment 2 — every hop is attempted in order. When soft triggers reactivate in v1.x, the equivalence can break: a soft-skipped hop 0 followed by hard-failed hops 1+N would still report `providerUsed=chain[0]` even though chain[0]'s `spawn()` was never called. The README description "which provider's plugin **served** the request" is technically false in this latent edge case. GitHub issue #8 tracked the ambiguity.

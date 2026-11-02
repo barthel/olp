@@ -7,6 +7,12 @@
 
 ## Amendments
 
+### Amendment 9 — 2026-11-02: Requests with `tools[]` bypass the cache
+
+- **Finding:** With the anthropic tool bridge (ADR 0009 Amendment 2) the answer to a request with `tools[]` can be a set of tool calls with generated ids. Replaying such an answer from the cache hands the client a call it has already executed (or one whose id no longer matches the client's state).
+- **Decision:** A request whose IR has a non-empty `tools` array neither reads nor writes the cache (same effect as `hints.cacheable === false`, decided per request). Requests without `tools[]` are unaffected, including follow-up turns that contain `role: tool` messages. The `tools` field stays in the cache key composition (Amendment 2) so a later change of this rule cannot collide with old entries.
+- **Authority:** ADR 0005 § "Cache write conditions"; ADR 0002 Amendment 3 (`cacheable`).
+
 ### Amendment 8 — 2026-05-25: Streaming singleflight — v1.x design ratification (D42, issue #16)
 
 **Status:** Design ratified. Implementation deferred to v1.x.

@@ -7,6 +7,13 @@
 
 ## Amendments
 
+### Amendment 4 — 2026-11-02: Client tool calls on the wire: `index` per streamed call, `finish_reason: tool_calls`
+
+- **Finding:** The IR already carries `tool_calls` on response chunks (§ Decision "Response chunk"), and `irChunkToOpenAISSE` passes them through, but no provider has ever produced them. Once the anthropic plugin does (ADR 0009 Amendment 2), two entry-surface details matter: the OpenAI streaming spec requires an `index` on every `delta.tool_calls[]` entry, and a response that ends in tool calls must finish with `finish_reason: "tool_calls"`. Mistral Vibe reads both (`vibe/adapters/generic/_openai_chat.py`, `_parse_tool_calls`, and the `stream_tool_calls` option it sets).
+- **Decision:** (1) The IR shape does not change; `IRToolCall` stays `{id, type, function:{name, arguments}}`. (2) `irChunkToOpenAISSE` adds `index` to every streamed tool call: the call's own numeric `index` when a provider set one, otherwise its position in the chunk's `tool_calls` array. A provider that spreads calls over several delta chunks must set `index` itself. (3) `irResponseToOpenAINonStream` strips `index` (the non-streaming `message.tool_calls[]` has none). (4) A provider that emits tool calls ends the stream with a stop chunk whose `finish_reason` is `tool_calls`; the entry surface does not infer it.
+- **Authority:** OpenAI Chat Completions streaming spec, `delta.tool_calls[].index` and `finish_reason` (https://platform.openai.com/docs/api-reference/chat/streaming, https://platform.openai.com/docs/api-reference/chat/object#finish_reason). Pinned in `docs/openai-spec-pin.md`.
+- **Tests:** Suite 3 (`irChunkToOpenAISSE` format) gains: index from position, explicit index kept, non-stream strip, stop chunk with `tool_calls`.
+
 ### Amendment 3 — 2026-05-27: Accept OpenAI `role: "developer"` at entry surface, normalize to `system` in IR
 
 - **Finding:** Hermes Agent v0.13/v0.14 (and likely Cline, Continue.dev, and other modern openai-completions clients) default to `role: "developer"` for what was historically the `system`-role slot when the model id matches OpenAI's o1/o3+ reasoning family. The `developer` role was introduced by OpenAI's Responses-API spec for reasoning models (high-priority developer-authored instructions; semantically a peer of `system`). OLP IR's role allow-list at v0.1 was the original four roles (`system|user|assistant|tool`); the IR validator rejected `developer` with `400 IR validation failed: role must be one of system|user|assistant|tool, got "developer"`. Reproduced 2026-05-27 on PI230 Hermes v0.14.0 → OLP v0.5.1 routing path.

@@ -4,6 +4,10 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Client tool calls through the anthropic provider (ADR amendments, PR A of 3)
+
+- **docs(adr): client tool calls** — ADR 0002 Amendment 10 (`hints.supportsClientTools`, `hints.toolCallIdleMs`), ADR 0003 Amendment 4 (`index` per streamed tool call, `finish_reason: tool_calls`), ADR 0004 Amendment 7 (chain is not filtered by tool support, `tools_dropped` log), ADR 0005 Amendment 9 (requests with `tools[]` bypass the cache), ADR 0009 Amendment 2 (MCP stub bridge for the claude CLI). Evidence: `docs/spikes/2026-11-02-client-tool-bridge.md` (claude CLI 2.1.304). Implementation follows in PR B (entry surface) and PR C (anthropic plugin).
+
 ### Multi-account per provider, foundation (issue #75, PR 1)
 
 - **feat(accounts): `providers.<provider>.accounts.<id>.dir` + per-hop `account`** — A fallback hop may name an additional login of `anthropic` or `codex`. The spawn sees that login only through its per-spawn ephemeral home (ADR 0014 Amendment 1 Layers 1 and 2): new optional `ISOLATION.accountCredentialMounts(dir)` in the provider contract (additive to ADR 0002 Amendment 9), `prepareIsolatedEnvironment({ accountDir })`, new `lib/accounts.mjs`. Credential locations follow the CLI documentation (`CLAUDE_CONFIG_DIR` / `.credentials.json` for Claude Code, `CODEX_HOME` / `auth.json` for Codex). An unknown account id or a provider without account support fails with `AUTH_MISSING` and is never masked by the default login (ADR 0004: `AUTH_MISSING` is not a fallback trigger).
