@@ -464,6 +464,30 @@ describe('irChunkToOpenAISSE format', () => {
     assert.deepEqual(u.usage, usage);
   });
 
+  it('tool call deltas carry index: position by default, provider-set index wins (ADR 0003 Amendment 4)', () => {
+    const calls = [
+      { id: 'call_a', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Berlin"}' } },
+      { id: 'call_b', type: 'function', function: { name: 'get_weather', arguments: '{"city":"München"}' } },
+    ];
+    const d = JSON.parse(irChunkToOpenAISSE({ type: 'delta', role: 'assistant', tool_calls: calls }, ID, MODEL).slice(6).trim());
+    assert.deepEqual(d.choices[0].delta.tool_calls.map(t => t.index), [0, 1]);
+    assert.equal(d.choices[0].delta.tool_calls[1].function.arguments, '{"city":"München"}');
+    assert.equal(d.choices[0].delta.content, undefined);
+    const d2 = JSON.parse(irChunkToOpenAISSE({ type: 'delta', tool_calls: [{ ...calls[0], index: 3 }] }, ID, MODEL).slice(6).trim());
+    assert.equal(d2.choices[0].delta.tool_calls[0].index, 3);
+    assert.equal(calls[0].index, undefined, 'input IR chunk must not be mutated');
+  });
+
+  it('non-stream message.tool_calls has no index; finish_reason tool_calls is kept', () => {
+    const resp = irResponseToOpenAINonStream([
+      { type: 'delta', tool_calls: [{ id: 'call_a', index: 0, type: 'function', function: { name: 'f', arguments: '{}' } }] },
+      { type: 'stop', finish_reason: 'tool_calls' },
+    ], ID, MODEL);
+    assert.equal(resp.choices[0].finish_reason, 'tool_calls');
+    assert.deepEqual(resp.choices[0].message.tool_calls, [{ id: 'call_a', type: 'function', function: { name: 'f', arguments: '{}' } }]);
+    assert.equal(resp.choices[0].message.content, null);
+  });
+
   it('does not invent a top-level error field on error chunks (ALIGNMENT.md Rule 2(b))', () => {
     // ALIGNMENT.md Rule 2 (b): OLP must not introduce OpenAI-spec fields that
     // OpenAI's /v1/chat/completions specification does not document.
@@ -558,6 +582,17 @@ describe('Provider contract validation', () => {
     const r = validateProvider(makeProvider());
     assert.equal(r.valid, true);
     assert.deepEqual(r.errors, []);
+  });
+
+  it('validates hints.supportsClientTools and hints.toolCallIdleMs (ADR 0002 Amendment 10)', () => {
+    const ok = makeProvider(); ok.hints = { ...ok.hints, supportsClientTools: true, toolCallIdleMs: 250 };
+    assert.equal(validateProvider(ok).valid, true);
+    const badFlag = makeProvider(); badFlag.hints = { ...badFlag.hints, supportsClientTools: 'yes' };
+    assert.ok(validateProvider(badFlag).errors.some(e => e.includes('supportsClientTools')));
+    for (const v of [0, -5, 1.5, '400']) {
+      const bad = makeProvider(); bad.hints = { ...bad.hints, toolCallIdleMs: v };
+      assert.ok(validateProvider(bad).errors.some(e => e.includes('toolCallIdleMs')), `toolCallIdleMs=${JSON.stringify(v)}`);
+    }
   });
 
   it('rejects provider with missing name', () => {
@@ -2995,6 +3030,32 @@ describe('D36 #2 — cache_control partial-noop debug log (Suite 9f)', () => {
     const events = findEvents('cache_control_partial_noop');
     assert.equal(events.length, 0,
       `Expected 0 cache_control_partial_noop events when no markers; got ${events.length}: ${JSON.stringify(events)}`);
+  });
+
+  it('ADR 0005 Amendment 9: tools[] requests bypass the cache and log tools_dropped for hops without supportsClientTools', async () => {
+    let spawns = 0;
+    const mk = makeMockCodexSpawn([JSON.stringify({ content: 'codex-out-tools' }), JSON.stringify({ type: 'stop' })]);
+    codexSetSpawnImpl((...a) => { spawns++; return mk(...a); });
+    const tools = [{ type: 'function', function: { name: 'get_weather', parameters: { type: 'object', properties: {} } } }];
+    const post = (body) => fetch({ port: portD36, method: 'POST', path: '/v1/chat/completions', body });
+    startStdoutCapture();
+    try {
+      for (let n = 0; n < 2; n++) {
+        const r = await post({ model: 'gpt-5.5', tools, messages: [{ role: 'user', content: 'hello-tools-bypass' }] });
+        assert.equal(r.status, 200, r.body.slice(0, 200));
+      }
+    } finally { stopStdoutCapture(); }
+    assert.equal(spawns, 2, 'identical tools[] requests must both reach the provider');
+    assert.ok(findEvents('tools_dropped').length >= 2, 'tools_dropped must be logged per request');
+    assert.ok(findEvents('cache_bypass').some(e => e.reason === 'tools'), 'cache_bypass reason=tools expected');
+
+    // Control: the same request without tools is cached (second call served from cache).
+    spawns = 0;
+    for (let n = 0; n < 2; n++) {
+      const r = await post({ model: 'gpt-5.5', messages: [{ role: 'user', content: 'hello-tools-control' }] });
+      assert.equal(r.status, 200, r.body.slice(0, 200));
+    }
+    assert.equal(spawns, 1, 'without tools[] the second identical request must be a cache hit');
   });
 
   it('D36 #2c: markers + anthropic-only chain → cache_control_partial_noop does NOT fire', async () => {

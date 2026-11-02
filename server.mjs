@@ -1187,6 +1187,17 @@ async function handleChatCompletions(req, res) {
   }
   auditCtx.model = ir.model;
 
+  // ADR 0005 Amendment 9: a request with tools[] never reads or writes the cache;
+  // its answer may be tool calls the client has to act on exactly once.
+  const requestHasTools = Array.isArray(ir.tools) && ir.tools.length > 0;
+  // ADR 0004 Amendment 7: hops that cannot pass tools[] to the model stay in the
+  // chain (tools dropped as before); the log shows when that happens.
+  const noteToolsDropped = (providerName, plugin) => {
+    if (requestHasTools && plugin?.hints?.supportsClientTools !== true) {
+      logEvent('info', 'tools_dropped', { provider: providerName, tools: ir.tools.length, request_id: requestId });
+    }
+  };
+
   // ── Fallback engine: build chain (ADR 0004) ─────────────────────────────
   // buildDefaultChain returns null if no enabled provider serves this model.
   // Per ADR 0004 § D9: at v0.1, chain is single-hop (no fallback) unless the
@@ -1481,6 +1492,17 @@ async function handleChatCompletions(req, res) {
       return collectAllChunks();
     }
 
+    // ADR 0005 Amendment 9: tools[] requests bypass the cache.
+    if (requestHasTools) {
+      logEvent('debug', 'cache_bypass', {
+        model: hopModel,
+        provider: hopProvider,
+        reason: 'tools',
+      });
+      noteToolsDropped(hopProvider, hopProviderPlugin);
+      return collectAllChunks();
+    }
+
     // D13: per-hop bypass evaluation (ADR 0005 § D2).
     // Bypass only when this hop's provider is Anthropic AND markers are present.
     const bypassCacheForThisHop = shouldBypassCacheForHop(hopProvider);
@@ -1550,7 +1572,7 @@ async function handleChatCompletions(req, res) {
   const firstHopProvider = loadedProviders.get(chain[0].provider);
   const cacheableForFirstHop = firstHopProvider?.hints?.cacheable !== false;
   const firstHopCacheKey = computeCacheKey(chain[0].provider, chain[0].model, ir);
-  const preCheckHit = (bypassCacheForFirstHop || !cacheableForFirstHop) ? false : await cacheStore.peek(keyId, firstHopCacheKey);
+  const preCheckHit = (bypassCacheForFirstHop || !cacheableForFirstHop || requestHasTools) ? false : await cacheStore.peek(keyId, firstHopCacheKey);
 
   // ── P1.2: Real SSE streaming path (single-hop cache-miss) ──────────────
   // ADR 0003 entry adapter pattern: for await irChunk → res.write(irChunkToOpenAISSE).
@@ -1654,12 +1676,17 @@ async function handleChatCompletions(req, res) {
     let stream;
     let role;
     try {
-      const result = await cacheStore.getOrComputeStreaming(
-        keyId,
-        streamCacheKey,
-        sourceFactory,
-        { clientId: requestId },
-      );
+      // ADR 0005 Amendment 9: tools[] requests skip the cache layer (no
+      // singleflight join, no write). The source runs for this client only.
+      if (requestHasTools) noteToolsDropped(streamProvider, streamPlugin);
+      const result = requestHasTools
+        ? { stream: sourceFactory(), role: 'source' }
+        : await cacheStore.getOrComputeStreaming(
+          keyId,
+          streamCacheKey,
+          sourceFactory,
+          { clientId: requestId },
+        );
       stream = result.stream;
       role = result.role;
     } catch (e) {

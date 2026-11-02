@@ -95,6 +95,7 @@ data: [DONE]
 ```
 
 - `delta` carries `role` (first chunk only), `content` (text chunks), or `tool_calls` (tool call chunks).
+- Every `delta.tool_calls[]` entry carries an `index` (OLP: provider-set index, else position in the chunk's array; ADR 0003 Amendment 4). The non-streaming `message.tool_calls[]` has none. Ref: https://platform.openai.com/docs/api-reference/chat/streaming
 - Final stop chunk has `finish_reason` set and empty `delta`.
 - `usage` is included in the stop chunk only when the provider surfaces token counts.
 - Stream terminator: `data: [DONE]\n\n`.

@@ -4,6 +4,12 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Client tool calls: entry surface (PR B of 3)
+
+- **feat(entry): tool calls on the wire** — Streamed `delta.tool_calls[]` entries carry `index` (provider-set or array position); the non-streaming message strips it. ADR 0003 Amendment 4. Spec: https://platform.openai.com/docs/api-reference/chat/streaming.
+- **feat(cache): requests with `tools[]` bypass the cache** (read, write and streaming singleflight join). ADR 0005 Amendment 9.
+- **feat(contract): `hints.supportsClientTools` / `hints.toolCallIdleMs`** validated by `validateProvider`; a request with `tools[]` served by a hop without `supportsClientTools` logs `tools_dropped` (the chain is not filtered). ADR 0002 Amendment 10, ADR 0004 Amendment 7. No provider declares support yet (PR C).
+
 ### Client tool calls through the anthropic provider (ADR amendments, PR A of 3)
 
 - **docs(adr): client tool calls** — ADR 0002 Amendment 10 (`hints.supportsClientTools`, `hints.toolCallIdleMs`), ADR 0003 Amendment 4 (`index` per streamed tool call, `finish_reason: tool_calls`), ADR 0004 Amendment 7 (chain is not filtered by tool support, `tools_dropped` log), ADR 0005 Amendment 9 (requests with `tools[]` bypass the cache), ADR 0009 Amendment 2 (MCP stub bridge for the claude CLI). Evidence: `docs/spikes/2026-11-02-client-tool-bridge.md` (claude CLI 2.1.304). Implementation follows in PR B (entry surface) and PR C (anthropic plugin).
