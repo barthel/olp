@@ -25,6 +25,16 @@ OLP is a **chat/completion proxy**, not a tool runtime. It forwards messages bet
 
 When an agentic client (Cline / Cursor / Continue.dev / Aider / Hermes Agent / OpenClaw) needs to call a tool, that tool runs **on the client's host**. The client sends the tool's output back as a follow-up message. OLP sees only the message stream — never an open file handle, an executed command, or a fetched URL.
 
+### Tool calls through the `anthropic` provider
+
+A request with `tools[]` is answered with real `tool_calls` (`finish_reason: "tool_calls"`) when it is served by the `anthropic` provider (`hints.supportsClientTools`). OLP registers the client's tools with the `claude` CLI as a throwaway MCP stub (`--mcp-config`, built-in tools off), reads the model's choice from the event stream, terminates the CLI before anything runs and returns the call to the client. The client runs the tool and sends the result back as a `role: "tool"` message; OLP renders the earlier calls and results as text in the next prompt. Details: [ADR 0009 Amendment 2](./docs/adr/0009-interactive-mode-path-placeholder.md), evidence in [`docs/spikes/2026-11-02-client-tool-bridge.md`](./docs/spikes/2026-11-02-client-tool-bridge.md).
+
+- `codex` and `mistral` still drop `tools[]` (text answer). A fallback hop on them logs `tools_dropped`; the chain is not filtered ([ADR 0004 Amendment 7](./docs/adr/0004-fallback-engine.md)). Pin an agentic client to `anthropic` with `providers_enabled` or the routing config.
+- Requests with `tools[]` skip the response cache ([ADR 0005 Amendment 9](./docs/adr/0005-cache-cross-provider.md)).
+- `tool_choice: "none"` turns the bridge off; `"required"` or a named function is passed as a sentence in the system prompt (the CLI has no flag).
+- Aborted runs have no token counts: with `stream_options.include_usage` the usage chunk is an estimate.
+- Not supported: spawns wrapped by sandbox-runtime Layer 3 (bridge skipped, `tools[]` dropped).
+
 Why this boundary matters:
 
 - **Multi-tenant safety.** A misbehaving prompt cannot use OLP to read files belonging to another OLP key holder. The threat surface is bounded to "what the model can say in a message" — not "what the model can do on the server."

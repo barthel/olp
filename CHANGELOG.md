@@ -4,6 +4,12 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Client tool calls: anthropic bridge (PR C of 3)
+
+- **feat(anthropic): `tools[]` answered with `tool_calls`** — With a non-empty `tools[]` the spawn registers the tools as an MCP stub (`lib/providers/anthropic-tool-stub.mjs`, `--mcp-config`, `--strict-mcp-config`, `--tools ""`, `--allowedTools`), collects the model's `tool_use` events of one message (idle window `hints.toolCallIdleMs`, default 400 ms), terminates the CLI and returns `tool_calls` with `finish_reason: "tool_calls"`. Tool names are sanitized to `[a-zA-Z0-9_-]{1,64}` and mapped back. Authority: claude CLI 2.1.304 § `--mcp-config`, `--strict-mcp-config`, `--tools`, `--allowedTools`; ADR 0009 Amendment 2; `docs/spikes/2026-11-02-client-tool-bridge.md`.
+- **Follow-up turn as text** — `irToAnthropic` renders assistant `tool_calls` as `[Assistant called tool <name> (id <id>) with <args>]` and resolves the name of `role: "tool"` messages from `tool_call_id`: `[Tool Result (<name>, id <id>)] …`. Tool messages without an id keep the old annotation.
+- **Not covered** — `tool_choice: "none"` (bridge off), Layer 3 wrapped spawns (bridge skipped, `tools[]` dropped), codex / mistral (unchanged). README § "Tool execution model" describes the behaviour.
+
 ### Client tool calls: entry surface (PR B of 3)
 
 - **feat(entry): tool calls on the wire** — Streamed `delta.tool_calls[]` entries carry `index` (provider-set or array position); the non-streaming message strips it. ADR 0003 Amendment 4. Spec: https://platform.openai.com/docs/api-reference/chat/streaming.

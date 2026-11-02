@@ -97,7 +97,14 @@ import anthropic, {
   buildCliArgs,
   parseStreamJsonLines,
   anthropicStreamJsonEventToIR,
+  // ADR 0009 Amendment 2 — client tool bridge
+  TOOL_BRIDGE_PREFIX,
+  sanitizeToolNames,
+  buildToolBridge,
+  anthropicToolUsesFromEvent,
+  toolUsesToIRToolCalls,
 } from './lib/providers/anthropic.mjs';
+import { handleMessage as toolStubHandle, loadTools as toolStubLoad } from './lib/providers/anthropic-tool-stub.mjs';
 import codex, {
   irToCodex,
   codexChunkToIR,
@@ -3056,6 +3063,57 @@ describe('D36 #2 — cache_control partial-noop debug log (Suite 9f)', () => {
       assert.equal(r.status, 200, r.body.slice(0, 200));
     }
     assert.equal(spawns, 1, 'without tools[] the second identical request must be a cache hit');
+  });
+
+  it('ADR 0009 Amendment 2 (HTTP): anthropic answers tools[] with tool_calls, streamed and non-streamed', async () => {
+    const mockClaude = () => function (_bin, _args, _opts) {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = {
+        write: () => {},
+        end: () => setImmediate(() => {
+          const ev = { type: 'assistant', message: { id: 'msg_http', content: [
+            { type: 'tool_use', id: 'toolu_http_1', name: 'mcp__olp__get_weather', input: { city: 'Berlin' } },
+          ] } };
+          proc.stdout.emit('data', Buffer.from(JSON.stringify(ev) + '\n'));
+        }),
+      };
+      proc.kill = () => setImmediate(() => proc.emit('close', null, 'SIGTERM'));
+      return proc;
+    };
+    const tools = [{ type: 'function', function: { name: 'get_weather', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }];
+    const post = (body) => fetch({ port: portD36, method: 'POST', path: '/v1/chat/completions', body });
+    __setSpawnImpl(mockClaude());
+    try {
+      // non-streaming
+      const r = await post({ model: 'claude-sonnet-4-6', tools, messages: [{ role: 'user', content: 'Wetter in Berlin? (http-tools-1)' }] });
+      assert.equal(r.status, 200, r.body.slice(0, 300));
+      const j = JSON.parse(r.body);
+      assert.equal(j.choices[0].finish_reason, 'tool_calls');
+      assert.equal(j.choices[0].message.content, null);
+      assert.deepEqual(j.choices[0].message.tool_calls, [
+        { id: 'toolu_http_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Berlin"}' } },
+      ]);
+
+      // streaming with include_usage
+      const rs = await post({ model: 'claude-sonnet-4-6', tools, stream: true, stream_options: { include_usage: true },
+        messages: [{ role: 'user', content: 'Wetter in Berlin? (http-tools-2)' }] });
+      assert.equal(rs.status, 200, rs.body.slice(0, 300));
+      const frames = rs.body.split('\n\n').filter(f => f.startsWith('data: ')).map(f => f.slice(6));
+      assert.equal(frames.at(-1), '[DONE]');
+      const objs = frames.slice(0, -1).map(f => JSON.parse(f));
+      const callDelta = objs.find(o => o.choices[0]?.delta?.tool_calls);
+      assert.ok(callDelta, 'a delta with tool_calls is expected');
+      assert.equal(callDelta.choices[0].delta.tool_calls[0].index, 0);
+      assert.equal(callDelta.choices[0].delta.tool_calls[0].function.name, 'get_weather');
+      assert.equal(callDelta.choices[0].delta.role, 'assistant');
+      const stop = objs.find(o => o.choices[0]?.finish_reason);
+      assert.equal(stop.choices[0].finish_reason, 'tool_calls');
+      const usageChunk = objs.at(-1);
+      assert.deepEqual(usageChunk.choices, []);
+      assert.ok(Number.isInteger(usageChunk.usage.total_tokens) && usageChunk.usage.total_tokens > 0, 'estimated usage expected');
+    } finally { __resetSpawnImpl(); }
   });
 
   it('D36 #2c: markers + anthropic-only chain → cache_control_partial_noop does NOT fire', async () => {
@@ -19979,5 +20037,322 @@ describe('include_usage: wantsUsageChunk / resolveUsage', () => {
     ]);
     // prompt: ceil(45/4)=12, completion: ceil(13/4)=4
     assert.deepEqual(r, { usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }, source: 'estimated' });
+  });
+});
+
+
+// ── Client tool bridge (ADR 0009 Amendment 2) ─────────────────────────────
+// Evidence: docs/spikes/2026-11-02-client-tool-bridge.md (claude CLI 2.1.304).
+
+describe('Client tool bridge: names, args, prompt (ADR 0009 Amendment 2)', () => {
+  const tool = (name, extra = {}) => ({ type: 'function', function: { name, description: 'd', parameters: { type: 'object', properties: {} }, ...extra } });
+
+  it('sanitizeToolNames maps invalid characters, dedupes, truncates to 64 and keeps the way back', () => {
+    const long = 'x'.repeat(80);
+    const { mcpTools, toClient } = sanitizeToolNames([tool('read file'), tool('read_file'), tool('read.file'), tool(long)]);
+    const names = mcpTools.map(t => t.name);
+    assert.equal(new Set(names).size, 4, 'names must be unique');
+    for (const n of names) assert.match(n, /^[a-zA-Z0-9_-]{1,64}$/);
+    assert.equal(toClient.get(names[0]), 'read file');
+    assert.equal(toClient.get(names[2]), 'read.file');
+    assert.equal(toClient.get(names[3]), long);
+  });
+
+  it('sanitizeToolNames supplies an object schema when parameters are missing', () => {
+    const { mcpTools } = sanitizeToolNames([{ type: 'function', function: { name: 'ping' } }]);
+    assert.deepEqual(mcpTools[0].inputSchema, { type: 'object', properties: {} });
+    assert.equal(mcpTools[0].description, '');
+  });
+
+  it('buildToolBridge returns null without tools, with empty tools and with tool_choice none', () => {
+    assert.equal(buildToolBridge({ messages: [] }), null);
+    assert.equal(buildToolBridge({ tools: [], messages: [] }), null);
+    assert.equal(buildToolBridge({ tools: [tool('a')], tool_choice: 'none', messages: [] }), null);
+  });
+
+  it('buildToolBridge: args register the stub, restrict tools, and the tool list lives in a temp file', async () => {
+    const { readFileSync, existsSync } = await import('node:fs');
+    const b = buildToolBridge({ tools: [tool('get weather')], messages: [] });
+    try {
+      const a = b.args;
+      assert.equal(a[a.indexOf('--strict-mcp-config')], '--strict-mcp-config');
+      assert.equal(a[a.indexOf('--tools') + 1], '', '--tools must be the empty string (no built-in tools)');
+      const allowed = a.slice(a.indexOf('--allowedTools') + 1);
+      assert.deepEqual(allowed, [`${TOOL_BRIDGE_PREFIX}get_weather`]);
+      const cfg = JSON.parse(a[a.indexOf('--mcp-config') + 1]);
+      const srv = cfg.mcpServers.olp;
+      assert.equal(srv.command, process.execPath);
+      assert.ok(srv.args[0].endsWith('anthropic-tool-stub.mjs'));
+      const spec = JSON.parse(readFileSync(srv.args[1], 'utf8'));
+      assert.equal(spec[0].name, 'get_weather');
+      assert.equal(b.toClient.get('get_weather'), 'get weather');
+      assert.equal(b.systemSuffix, '');
+    } finally {
+      const { rmSync } = await import('node:fs');
+      rmSync(b.cleanupDir, { recursive: true, force: true });
+    }
+    assert.equal(existsSync(b.cleanupDir), false);
+  });
+
+  it('buildToolBridge: tool_choice required / named function adds a system prompt sentence', async () => {
+    const { rmSync } = await import('node:fs');
+    const req = buildToolBridge({ tools: [tool('a b'), tool('c')], tool_choice: 'required', messages: [] });
+    const named = buildToolBridge({ tools: [tool('a b'), tool('c')], tool_choice: { type: 'function', function: { name: 'a b' } }, messages: [] });
+    try {
+      assert.match(req.systemSuffix, /at least one of the provided tools/);
+      assert.match(named.systemSuffix, /calling the tool a_b\./);
+    } finally {
+      rmSync(req.cleanupDir, { recursive: true, force: true });
+      rmSync(named.cleanupDir, { recursive: true, force: true });
+    }
+  });
+
+  it('buildCliArgs: bridge args and system suffix are appended; without a bridge the args are unchanged', () => {
+    const plain = buildCliArgs('claude-sonnet-4-6', 'SYS');
+    assert.ok(!plain.includes('--mcp-config'));
+    const withBridge = buildCliArgs('claude-sonnet-4-6', 'SYS', { args: ['--mcp-config', '{}'], systemSuffix: 'DO IT' });
+    assert.equal(withBridge[withBridge.indexOf('--system-prompt') + 1], 'SYS\n\nDO IT');
+    assert.deepEqual(withBridge.slice(-2), ['--mcp-config', '{}']);
+  });
+
+  it('anthropicToolUsesFromEvent only returns bridge tool_use blocks of assistant events', () => {
+    const ev = {
+      type: 'assistant',
+      message: { id: 'msg_1', content: [
+        { type: 'text', text: 'hi' },
+        { type: 'tool_use', id: 'toolu_1', name: `${TOOL_BRIDGE_PREFIX}get_weather`, input: { city: 'Berlin' } },
+        { type: 'tool_use', id: 'toolu_2', name: 'Bash', input: {} },
+      ] },
+    };
+    const uses = anthropicToolUsesFromEvent(ev);
+    assert.equal(uses.length, 1);
+    assert.deepEqual(uses[0], { id: 'toolu_1', name: `${TOOL_BRIDGE_PREFIX}get_weather`, input: { city: 'Berlin' }, messageId: 'msg_1' });
+    assert.deepEqual(anthropicToolUsesFromEvent({ type: 'user', message: { content: [] } }), []);
+    assert.deepEqual(anthropicToolUsesFromEvent(null), []);
+  });
+
+  it('toolUsesToIRToolCalls restores client names and keeps ids; arguments are a JSON string', () => {
+    const calls = toolUsesToIRToolCalls(
+      [{ id: 'toolu_1', name: `${TOOL_BRIDGE_PREFIX}read_file`, input: { path: '/a b' } }],
+      new Map([['read_file', 'read file']]),
+    );
+    assert.deepEqual(calls, [{ id: 'toolu_1', type: 'function', function: { name: 'read file', arguments: '{"path":"/a b"}' } }]);
+  });
+
+  it('irToAnthropic renders assistant tool calls and resolves tool names from tool_call_id', () => {
+    const prompt = irToAnthropic({
+      messages: [
+        { role: 'user', content: 'Wetter?' },
+        { role: 'assistant', content: '', tool_calls: [
+          { id: 'toolu_A', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Berlin"}' } },
+          { id: 'toolu_B', type: 'function', function: { name: 'get_weather', arguments: '{"city":"München"}' } },
+        ] },
+        { role: 'tool', tool_call_id: 'toolu_A', content: '7 Grad' },
+        { role: 'tool', tool_call_id: 'toolu_B', content: '12 Grad' },
+      ],
+    });
+    assert.ok(prompt.includes('[Assistant called tool get_weather (id toolu_A) with {"city":"Berlin"}]'));
+    assert.ok(prompt.includes('[Tool Result (get_weather, id toolu_A)] 7 Grad'));
+    assert.ok(prompt.includes('[Tool Result (get_weather, id toolu_B)] 12 Grad'));
+    assert.ok(!prompt.includes('[Assistant] \n'), 'an empty assistant text must not leave a bare [Assistant] line');
+  });
+
+  it('irToAnthropic keeps the old annotation for tool messages without any id', () => {
+    const prompt = irToAnthropic({ messages: [{ role: 'user', content: 'x' }, { role: 'tool', content: 'r', name: 'search' }] });
+    assert.ok(prompt.includes('[Tool Result (search)] r'));
+  });
+});
+
+describe('Client tool bridge: MCP stub (ADR 0009 Amendment 2)', () => {
+  const tools = [{ name: 'get_weather', description: 'w', inputSchema: { type: 'object', properties: {} } }];
+
+  it('answers initialize (echoing the protocol version) and tools/list; ignores notifications', () => {
+    const init = toolStubHandle({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-11-25' } }, tools);
+    assert.equal(init.result.protocolVersion, '2025-11-25');
+    assert.deepEqual(init.result.capabilities, { tools: {} });
+    assert.deepEqual(toolStubHandle({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, tools).result.tools, tools);
+    assert.equal(toolStubHandle({ jsonrpc: '2.0', method: 'notifications/initialized' }, tools), null);
+  });
+
+  it('never answers tools/call (the client runs the tool); unknown methods get a JSON-RPC error', () => {
+    assert.equal(toolStubHandle({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_weather' } }, tools), null);
+    assert.equal(toolStubHandle({ jsonrpc: '2.0', id: 'x', method: 'server/discover' }, tools).error.code, -32601);
+  });
+
+  it('loadTools tolerates a missing or malformed file', async () => {
+    assert.deepEqual(toolStubLoad('/nonexistent/olp-tools.json'), []);
+    const { writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
+    const dir = mkdtempSync(_pathJoinForSetup(_tmpdirForSetup(), 'olp-stub-'));
+    try {
+      writeFileSync(_pathJoinForSetup(dir, 'bad.json'), '{nope');
+      assert.deepEqual(toolStubLoad(_pathJoinForSetup(dir, 'bad.json')), []);
+      writeFileSync(_pathJoinForSetup(dir, 'ok.json'), JSON.stringify(tools));
+      assert.deepEqual(toolStubLoad(_pathJoinForSetup(dir, 'ok.json')), tools);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it('runs as a process: replies to initialize and tools/list, stays silent on tools/call, exits when stdin closes', async () => {
+    const { spawn: cpSpawn } = await import('node:child_process');
+    const { writeFileSync, mkdtempSync, rmSync } = await import('node:fs');
+    const dir = mkdtempSync(_pathJoinForSetup(_tmpdirForSetup(), 'olp-stub-'));
+    const spec = _pathJoinForSetup(dir, 'tools.json');
+    writeFileSync(spec, JSON.stringify(tools));
+    try {
+      const child = cpSpawn(process.execPath, [new URL('./lib/providers/anthropic-tool-stub.mjs', import.meta.url).pathname, spec]);
+      let out = '';
+      child.stdout.on('data', d => { out += d; });
+      const exited = new Promise(r => child.on('close', code => r(code)));
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }) + '\n');
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\n');
+      child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_weather' } }) + '\n');
+      child.stdin.end();
+      assert.equal(await exited, 0);
+      const replies = out.trim().split('\n').map(l => JSON.parse(l));
+      assert.deepEqual(replies.map(r => r.id), [1, 2], 'no reply for id 3 (tools/call)');
+      assert.equal(replies[1].result.tools[0].name, 'get_weather');
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe('Client tool bridge: spawn (ADR 0009 Amendment 2)', () => {
+  const TOOLS = [{ type: 'function', function: { name: 'get_weather', description: 'w', parameters: { type: 'object', properties: { city: { type: 'string' } } } } }];
+  const AUTH = { accessToken: 'fake-token-tool-bridge' };
+  const toolUse = (id, city, msg = 'msg_1') => ({ type: 'assistant', message: { id: msg, content: [{ type: 'tool_use', id, name: `${TOOL_BRIDGE_PREFIX}get_weather`, input: { city } }] } });
+
+  /**
+   * Fake claude: emits the given events after stdin ends. `closeAfter` true → also
+   * emits close (a CLI that finished by itself); false → stays alive until kill().
+   */
+  function makeLiveSpawn(events, { closeAfter = false, capture = {} } = {}) {
+    return function (bin, args, opts) {
+      capture.bin = bin; capture.args = args; capture.opts = opts; capture.killSignals = [];
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.stdin = {
+        write: (d) => { capture.stdin = (capture.stdin ?? '') + d; },
+        end: () => {
+          setImmediate(() => {
+            for (const ev of events) proc.stdout.emit('data', Buffer.from(JSON.stringify(ev) + '\n'));
+            if (closeAfter) proc.emit('close', 0, null);
+          });
+        },
+      };
+      proc.kill = (sig) => { capture.killSignals.push(sig); setImmediate(() => proc.emit('close', null, sig)); };
+      return proc;
+    };
+  }
+
+  async function collect(ir, spawnImpl, isolationCtx) {
+    __setSpawnImpl(spawnImpl);
+    const saved = anthropic.hints.toolCallIdleMs;
+    anthropic.hints.toolCallIdleMs = 30;
+    const chunks = [];
+    try {
+      for await (const c of anthropic.spawn(ir, AUTH, isolationCtx)) chunks.push(c);
+    } finally { __resetSpawnImpl(); anthropic.hints.toolCallIdleMs = saved; }
+    return chunks;
+  }
+  const baseIR = (extra = {}) => ({ irVersion: '1.0', model: 'claude-sonnet-4-6', stream: true, tools: TOOLS, messages: [{ role: 'user', content: 'Wetter in Berlin und München?' }], ...extra });
+
+  it('declares supportsClientTools and a toolCallIdleMs hint, and still validates', () => {
+    assert.equal(anthropic.hints.supportsClientTools, true);
+    assert.equal(anthropic.hints.toolCallIdleMs, 400);
+    assert.equal(validateProvider(anthropic).valid, true);
+  });
+
+  it('collects parallel tool_use events, returns tool_calls + finish_reason tool_calls, kills the CLI and removes the temp dir', async () => {
+    const { existsSync } = await import('node:fs');
+    const cap = {};
+    const chunks = await collect(baseIR(), makeLiveSpawn([
+      { type: 'system', subtype: 'init', tools: [`${TOOL_BRIDGE_PREFIX}get_weather`] },
+      toolUse('toolu_1', 'Berlin'),
+      toolUse('toolu_2', 'München'),
+    ], { capture: cap }));
+    assert.equal(chunks.length, 2);
+    assert.equal(chunks[0].type, 'delta');
+    assert.equal(chunks[0].role, 'assistant');
+    assert.deepEqual(chunks[0].tool_calls, [
+      { id: 'toolu_1', type: 'function', function: { name: 'get_weather', arguments: '{"city":"Berlin"}' } },
+      { id: 'toolu_2', type: 'function', function: { name: 'get_weather', arguments: '{"city":"München"}' } },
+    ]);
+    assert.deepEqual(chunks[1], { type: 'stop', finish_reason: 'tool_calls' });
+    assert.deepEqual(cap.killSignals, ['SIGTERM'], 'the CLI must be terminated before it can run anything');
+    assert.ok(cap.args.includes('--mcp-config') && cap.args.includes('--strict-mcp-config'));
+    const cfg = JSON.parse(cap.args[cap.args.indexOf('--mcp-config') + 1]);
+    assert.equal(existsSync(cfg.mcpServers.olp.args[1]), false, 'temp tool spec must be removed');
+    assert.ok(cap.stdin.includes('Wetter in Berlin und München?'));
+  });
+
+  it('text before the tool call is streamed first; the tool_calls delta then carries no second role', async () => {
+    const chunks = await collect(baseIR(), makeLiveSpawn([
+      { type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'Ich frage nach.' }] } },
+      toolUse('toolu_1', 'Berlin'),
+    ]));
+    assert.equal(chunks[0].content, 'Ich frage nach.');
+    assert.equal(chunks[0].role, 'assistant');
+    assert.equal(chunks[1].role, undefined);
+    assert.equal(chunks[1].tool_calls.length, 1);
+    assert.equal(chunks[2].finish_reason, 'tool_calls');
+  });
+
+  it('a tool_use of a different message id ends the collection (first answer wins)', async () => {
+    const chunks = await collect(baseIR(), makeLiveSpawn([
+      toolUse('toolu_1', 'Berlin', 'msg_1'),
+      toolUse('toolu_2', 'München', 'msg_2'),
+    ]));
+    assert.deepEqual(chunks[0].tool_calls.map(t => t.id), ['toolu_1']);
+  });
+
+  it('a following result event ends the collection at once, tool calls win over the stop', async () => {
+    const chunks = await collect(baseIR(), makeLiveSpawn([
+      toolUse('toolu_1', 'Berlin'),
+      { type: 'result', subtype: 'success', is_error: false, usage: { input_tokens: 1, output_tokens: 1 } },
+    ], { closeAfter: true }));
+    assert.equal(chunks.at(-1).finish_reason, 'tool_calls');
+    assert.equal(chunks.at(-1).usage, undefined);
+  });
+
+  it('tool_calls are returned when the CLI closes by itself before the idle window passes', async () => {
+    const chunks = await collect(baseIR(), makeLiveSpawn([toolUse('toolu_1', 'Berlin')], { closeAfter: true }));
+    assert.equal(chunks[0].tool_calls[0].id, 'toolu_1');
+    assert.equal(chunks.at(-1).finish_reason, 'tool_calls');
+  });
+
+  it('no tools: no bridge args and no tool handling (plain answer with usage)', async () => {
+    const cap = {};
+    const chunks = await collect(baseIR({ tools: undefined }), makeLiveSpawn([
+      { type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'hallo' }] } },
+      { type: 'result', subtype: 'success', is_error: false, usage: { input_tokens: 2, output_tokens: 3 } },
+    ], { capture: cap }));
+    assert.ok(!cap.args.includes('--mcp-config'));
+    assert.equal(chunks.at(-1).finish_reason, 'stop');
+    assert.equal(chunks.at(-1).usage.total_tokens, 5);
+  });
+
+  it('tool_choice none: tools are not registered, the answer is plain text', async () => {
+    const cap = {};
+    const chunks = await collect(baseIR({ tool_choice: 'none' }), makeLiveSpawn([
+      { type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'ohne Tool' }] } },
+      { type: 'result', subtype: 'success', is_error: false },
+    ], { capture: cap }));
+    assert.ok(!cap.args.includes('--mcp-config'));
+    assert.equal(chunks[0].content, 'ohne Tool');
+  });
+
+  it('Layer 3 wrapped spawn: the bridge is skipped and tools[] is dropped as before', async () => {
+    const cap = {};
+    const chunks = await collect(baseIR(), makeLiveSpawn([
+      toolUse('toolu_1', 'Berlin'),
+      { type: 'assistant', message: { id: 'msg_2', content: [{ type: 'text', text: 'Text' }] } },
+      { type: 'result', subtype: 'success', is_error: false },
+    ], { capture: cap }), {
+      wrapForLayer3: async (bin) => `/usr/bin/env ${bin}`,
+      envOverrides: {}, hardenedArgs: (a) => a, cleanup: async () => {},
+    });
+    assert.equal(cap.bin, '/bin/sh');
+    assert.ok(!JSON.stringify(cap.args).includes('mcp-config'));
+    assert.ok(chunks.every(c => !c.tool_calls), 'no tool_calls without the bridge');
+    assert.equal(chunks.at(-1).finish_reason, 'stop');
   });
 });
