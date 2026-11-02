@@ -20038,6 +20038,20 @@ describe('include_usage: wantsUsageChunk / resolveUsage', () => {
     // prompt: ceil(45/4)=12, completion: ceil(13/4)=4
     assert.deepEqual(r, { usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }, source: 'estimated' });
   });
+
+  it('resolveUsage estimate counts tool definitions, earlier tool calls and streamed tool calls', () => {
+    const tools = [{ type: 'function', function: { name: 'f' } }];
+    const calls = [{ id: 'c1', type: 'function', function: { name: 'f', arguments: '{}' } }];
+    const r = resolveUsage({ tools, messages: [{ content: '', tool_calls: calls }] }, [
+      { type: 'delta', tool_calls: calls },
+      { type: 'stop', finish_reason: 'tool_calls' },
+    ]);
+    const len = (v) => JSON.stringify(v).length;
+    assert.equal(r.source, 'estimated');
+    assert.equal(r.usage.prompt_tokens, Math.ceil((len(tools) + 0 + len(calls)) / 4));
+    assert.equal(r.usage.completion_tokens, Math.ceil(len(calls) / 4));
+    assert.ok(r.usage.completion_tokens > 0);
+  });
 });
 
 
