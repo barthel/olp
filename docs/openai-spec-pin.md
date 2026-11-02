@@ -30,6 +30,7 @@ implements as the entry surface, verified against `lib/ir/openai-to-ir.mjs` and
 | `messages[i].name` | string | optional | Passed through to IR |
 | `messages[i].tool_call_id` | string | optional | Passed through to IR |
 | `messages[i].tool_calls` | array | optional | `{id, type:'function', function:{name, arguments}}` |
+| `stream_options.include_usage` | boolean | optional | `stream:true` only. Sends a final chunk with `choices: []` and `usage` before `[DONE]`; counts the provider reported, else a chars/4 estimate (logged as `usage_estimated`). Spec: https://platform.openai.com/docs/api-reference/chat/create#chat-create-stream_options |
 | `messages[i].function_call` | object | optional | Deprecated field; mapped to a single `tool_calls` entry |
 | `stream` | boolean | optional | Default `false`; `true` triggers SSE path |
 | `temperature` | number | optional | Range `[0, 2]`; passed to IR |
@@ -54,7 +55,7 @@ read in `openAIToIR`):
 - `user`
 - `service_tier`
 - `parallel_tool_calls`
-- `stream_options`
+- `stream_options` other than `include_usage` (see below)
 
 **Response shape (non-streaming)** — `object: 'chat.completion'`
 (assembled by `irResponseToOpenAINonStream` in `lib/ir/ir-to-openai.mjs`):

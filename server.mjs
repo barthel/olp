@@ -34,8 +34,10 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 import { openAIToIR, BadRequestError } from './lib/ir/openai-to-ir.mjs';
+import { wantsUsageChunk, resolveUsage } from './lib/ir/usage.mjs';
 import {
   irChunkToOpenAISSE,
+  irUsageToOpenAISSE,
   irResponseToOpenAINonStream,
   generateRequestId,
   SSE_DONE,
@@ -1170,8 +1172,11 @@ async function handleChatCompletions(req, res) {
 
   // Translate OpenAI → IR (ADR 0003)
   let ir;
+  // stream_options.include_usage (OpenAI spec): final usage chunk before [DONE].
+  let includeUsage = false;
   try {
     ir = openAIToIR(body);
+    includeUsage = wantsUsageChunk(body);
   } catch (e) {
     if (e instanceof BadRequestError) {
       auditCtx.error_code = 'invalid_ir';
@@ -1834,6 +1839,7 @@ async function handleChatCompletions(req, res) {
           firstChunkEmitted = true;
 
           if (irChunk.type === 'stop') {
+            if (includeUsage) writeUsageChunk(res, ir, streamedChunks, requestId, streamProvider);
             res.write(SSE_DONE);
             res.end();
             // D58 — ADR 0005 Amendment 8 §4: cache write is performed by the
@@ -2112,6 +2118,7 @@ async function handleChatCompletions(req, res) {
       res.write(irChunkToOpenAISSE(irChunk, requestId, ir.model));
       if (irChunk.type === 'stop') break;
     }
+    if (includeUsage) writeUsageChunk(res, ir, chunks, requestId, providerUsed);
     res.write(SSE_DONE);
     res.end();
   } else {
@@ -2119,6 +2126,20 @@ async function handleChatCompletions(req, res) {
     const responseObj = irResponseToOpenAINonStream(chunks, requestId, ir.model);
     sendJSON(res, 200, responseObj, headers);
   }
+}
+
+/**
+ * Writes the stream_options.include_usage chunk. Counts the provider reported
+ * are used as-is; otherwise they are estimated (chars/4) and the estimate is
+ * logged, because the SSE headers are already sent at this point.
+ */
+function writeUsageChunk(res, ir, chunks, requestId, provider) {
+  const { usage, source } = resolveUsage(ir, chunks);
+  if (!usage) return;
+  if (source === 'estimated') {
+    logEvent('info', 'usage_estimated', { provider, model: ir.model, ...usage });
+  }
+  res.write(irUsageToOpenAISSE(usage, requestId, ir.model));
 }
 
 // ── Phase 3 / D50 — Management endpoints (owner_only_block per ADR 0008 §8) ──

@@ -58,8 +58,10 @@ process.on('exit', () => {
 
 import { validateIRRequest, validateIRMessage, VALID_ROLES, IR_VERSION } from './lib/ir/types.mjs';
 import { openAIToIR, BadRequestError } from './lib/ir/openai-to-ir.mjs';
+import { wantsUsageChunk, resolveUsage } from './lib/ir/usage.mjs';
 import {
   irChunkToOpenAISSE,
+  irUsageToOpenAISSE,
   irResponseToOpenAINonStream,
   generateRequestId,
   SSE_DONE,
@@ -450,6 +452,16 @@ describe('irChunkToOpenAISSE format', () => {
     const payload = JSON.parse(sse.slice(6).trim());
     assert.equal(payload.choices[0].finish_reason, 'stop');
     assert.deepEqual(payload.choices[0].delta, {});
+  });
+
+  it('stop chunk never carries usage; usage travels in its own chunk (OpenAI streaming spec)', () => {
+    const usage = { prompt_tokens: 3, completion_tokens: 4, total_tokens: 7 };
+    const stop = JSON.parse(irChunkToOpenAISSE({ type: 'stop', finish_reason: 'stop', usage }, ID, MODEL).slice(6).trim());
+    assert.equal(stop.usage, undefined);
+    const u = JSON.parse(irUsageToOpenAISSE(usage, ID, MODEL).slice(6).trim());
+    assert.equal(u.object, 'chat.completion.chunk');
+    assert.deepEqual(u.choices, []);
+    assert.deepEqual(u.usage, usage);
   });
 
   it('does not invent a top-level error field on error chunks (ALIGNMENT.md Rule 2(b))', () => {
@@ -19875,5 +19887,36 @@ describe('Suite 54 (server) — active account in /v0/management/quota', () => {
     markCool51('anthropic', 'iteratec', 3600_000);
     const rows = await rowsOf54();
     assert.deepEqual(rows.filter((r) => r.account !== null).map((r) => r.active), [false, false]);
+  });
+});
+
+
+// ── stream_options.include_usage ──────────────────────────────────────────
+describe('include_usage: wantsUsageChunk / resolveUsage', () => {
+  it('wantsUsageChunk is true only for stream:true + include_usage:true', () => {
+    assert.equal(wantsUsageChunk({ stream: true, stream_options: { include_usage: true } }), true);
+    assert.equal(wantsUsageChunk({ stream: true, stream_options: { include_usage: false } }), false);
+    assert.equal(wantsUsageChunk({ stream: true }), false);
+    assert.equal(wantsUsageChunk({ stream: false, stream_options: { include_usage: true } }), false);
+    assert.equal(wantsUsageChunk(null), false);
+  });
+
+  it('resolveUsage prefers provider-reported counts', () => {
+    const usage = { prompt_tokens: 9, completion_tokens: 2, total_tokens: 11 };
+    const r = resolveUsage({ messages: [{ content: 'x' }] }, [
+      { type: 'delta', content: 'hi' },
+      { type: 'stop', finish_reason: 'stop', usage },
+    ]);
+    assert.deepEqual(r, { usage, source: 'reported' });
+  });
+
+  it('resolveUsage estimates chars/4 when the provider reported nothing', () => {
+    const r = resolveUsage({ messages: [{ content: 'a'.repeat(40) }, { content: 'b'.repeat(5) }] }, [
+      { type: 'delta', content: 'c'.repeat(8) },
+      { type: 'delta', content: 'd'.repeat(5) },
+      { type: 'stop', finish_reason: 'stop' },
+    ]);
+    // prompt: ceil(45/4)=12, completion: ceil(13/4)=4
+    assert.deepEqual(r, { usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 }, source: 'estimated' });
   });
 });
