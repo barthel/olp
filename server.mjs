@@ -52,6 +52,7 @@ import {
 } from './lib/providers/index.mjs';
 import { ProviderError } from './lib/providers/base.mjs';
 import { resolveAccount } from './lib/accounts.mjs';
+import { anthropicLimitResetFromQuota } from './lib/providers/anthropic.mjs';
 import { computeCacheKey, hasCacheControl, extractCacheControlMarkers } from './lib/cache/keys.mjs';
 import { CacheStore } from './lib/cache/store.mjs';
 import {
@@ -418,6 +419,20 @@ export function __setFallbackConfig(config) {
 /** @internal — reset to file-based config */
 export function __resetFallbackConfig() {
   _fallbackConfig = loadFallbackConfigSync();
+}
+
+// Reset time of an account limit when the failed spawn did not report one
+// (issue #75). Only anthropic has a quota probe; every other provider and any
+// failure yields null, so the engine keeps its fixed cool-down. The probe
+// result is cached by the plugin (5 min), so this adds at most one request
+// per account and window.
+async function _resolveAccountLimitReset(provider, account, err) {
+  if (provider !== 'anthropic') return null;
+  const plugin = loadedProviders.get(provider);
+  if (typeof plugin?.quotaStatus !== 'function') return null;
+  const credential = resolveAccount(_fallbackConfig, provider, account);
+  const quota = await plugin.quotaStatus({ account, credential });
+  return anthropicLimitResetFromQuota(quota, err?.message);
 }
 
 /**
@@ -1900,6 +1915,7 @@ async function handleChatCompletions(req, res) {
     fallbackResult = await executeWithFallback(chain, ir, executeHopFn, {
       logEvent,
       accountCooldownMs: _fallbackConfig?.account_cooldown_ms,
+      resolveLimitReset: _resolveAccountLimitReset,
     });
   } catch (e) {
     // executeWithFallback throws only on programming errors (empty chain).

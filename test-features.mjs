@@ -19578,3 +19578,113 @@ describe('Suite 52 — limit detection from rate_limit_event', () => {
     assert.equal(events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_until, until);
   });
 });
+
+// ── Suite 53 — cool-down until the reset known from the quota probe (issue #75) ─
+// Observed 2026-11-01: the claude CLI reported the weekly limit only as the text
+// of a result event ("You've hit your weekly limit · resets Nov 4 at 4pm"), no
+// rate_limit_event with status rejected, so the cool-down fell back to 300 s.
+import { anthropicLimitResetFromQuota as resetFromQuota53 } from './lib/providers/anthropic.mjs';
+import {
+  accountCooldownUntil as coolUntil53,
+  __resetAccountCooldowns as resetCool53,
+} from './lib/fallback/cooldown.mjs';
+
+describe('Suite 53 — limit reset from the quota snapshot', () => {
+  const now53 = 1793566000000;
+  const sec53 = (offsetS) => Math.floor(now53 / 1000) + offsetS;
+  const quota53 = (fields) => ({ probe_status: 'live', fields });
+  const weekly53 = (extra = {}) => quota53({
+    status: 'allowed', status_5h: 'allowed', status_7d: 'allowed',
+    utilization_5h: 0.1, utilization_7d: 0.97,
+    reset: sec53(3600), reset_5h: sec53(3600), reset_7d: sec53(250000),
+    ...extra,
+  });
+
+  afterEach(() => resetCool53());
+
+  it('53a: a rejected overall status uses the unified reset', () => {
+    const q = weekly53({ status: 'rejected', reset: sec53(7200) });
+    assert.equal(resetFromQuota53(q, 'x', now53), sec53(7200) * 1000);
+  });
+
+  it('53b: a rejected window, or utilization of 1 or more, uses that window reset (latest wins)', () => {
+    assert.equal(resetFromQuota53(weekly53({ status_7d: 'rejected' }), 'x', now53), sec53(250000) * 1000);
+    assert.equal(resetFromQuota53(weekly53({ utilization_5h: 1 }), 'x', now53), sec53(3600) * 1000);
+    assert.equal(resetFromQuota53(weekly53({ utilization_5h: 1, utilization_7d: 1 }), 'x', now53), sec53(250000) * 1000);
+  });
+
+  it('53c: a snapshot that still says allowed uses the window named in the message', () => {
+    const q = weekly53({ utilization_7d: 0.97 });
+    assert.equal(resetFromQuota53(q, "You've hit your weekly limit · resets Nov 4 at 4pm", now53), sec53(250000) * 1000);
+    assert.equal(resetFromQuota53(q, "You've hit your 5-hour limit", now53), sec53(3600) * 1000);
+    assert.equal(resetFromQuota53(q, "You've hit your usage limit", now53), null);
+  });
+
+  it('53d: resets in the past, missing fields and unreachable snapshots yield null', () => {
+    assert.equal(resetFromQuota53(weekly53({ status: 'rejected', reset: sec53(-60) }), 'x', now53), null);
+    assert.equal(resetFromQuota53(null, 'weekly', now53), null);
+    assert.equal(resetFromQuota53({ probe_status: 'unreachable', failure: { kind: 'auth_failed' } }, 'weekly', now53), null);
+    assert.equal(resetFromQuota53(quota53({}), 'weekly', now53), null);
+  });
+
+  const IR53 = { model: 'm', messages: [{ role: 'user', content: 'x' }], stream: false };
+  const chain53 = () => ([
+    { provider: 'anthropic', model: 'm', account: 'a' },
+    { provider: 'anthropic', model: 'm', account: 'b' },
+  ]);
+  const ok53 = [{ type: 'delta', role: 'assistant', content: 'ok' }, { type: 'stop', finish_reason: 'stop' }];
+  const textLimit53 = () => Object.assign(new Error("You've hit your weekly limit"), { code: 'PROVIDER_ERROR' });
+  const hop53 = (calls) => async (_p, _m, _ir, account) => {
+    calls.push(account);
+    if (account === 'a') throw textLimit53();
+    return ok53;
+  };
+
+  it('53e: a text-only limit error cools the account down until the reset the provider reports', async () => {
+    const resetsAtMs = Date.now() + 3 * 24 * 3600 * 1000;
+    const events = [];
+    const r = await executeWithFallback(chain53(), IR53, hop53([]), {
+      logEvent: (l, ev, data) => events.push([ev, data]),
+      accountCooldownMs: 300_000,
+      resolveLimitReset: async (provider, account) => (account === 'a' ? resetsAtMs : null),
+    });
+    assert.equal(r.accountUsed, 'b');
+    const until = coolUntil53('anthropic', 'a');
+    assert.ok(Math.abs(until - resetsAtMs) < 2000);
+    const ev = events.find(([n]) => n === 'fallback_account_limit')[1];
+    assert.equal(ev.cooldown_source, 'quota');
+  });
+
+  it('53f: without a reported reset, a lookup that returns null, throws or hangs keeps the fixed cool-down', async () => {
+    for (const resolveLimitReset of [
+      async () => null,
+      async () => { throw new Error('probe failed'); },
+      () => new Promise(() => {}),
+    ]) {
+      resetCool53();
+      const events = [];
+      const t0 = Date.now();
+      await executeWithFallback(chain53(), IR53, hop53([]), {
+        logEvent: (l, ev, data) => events.push([ev, data]),
+        accountCooldownMs: 120_000,
+        resolveLimitReset,
+      });
+      const until = coolUntil53('anthropic', 'a');
+      assert.ok(Math.abs(until - (t0 + 120_000)) < 8000, `until=${until - t0}`);
+      assert.equal(events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_source, 'fixed');
+    }
+  });
+
+  it('53g: an error that already carries resetsAtMs does not call the lookup', async () => {
+    let called = 0;
+    const withLimit = () => Object.assign(textLimit53(), { limit: { type: 'five_hour', resetsAtMs: Date.now() + 3600_000 } });
+    const hop = async (_p, _m, _ir, account) => { if (account === 'a') throw withLimit(); return ok53; };
+    const events = [];
+    await executeWithFallback(chain53(), IR53, hop, {
+      logEvent: (l, ev, data) => events.push([ev, data]),
+      resolveLimitReset: async () => { called++; return null; },
+    });
+    assert.equal(called, 0);
+    assert.equal(events.find(([n]) => n === 'fallback_account_limit')[1].cooldown_source, 'event');
+  });
+});
