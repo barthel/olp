@@ -4,6 +4,14 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Client tool bridge under Layer 3 (ADR 0009 Amendment 5)
+
+- **fix(anthropic): requests with `tools[]` keep `tool_calls` when Layer 3 wraps the spawn.** Before, every Vibe request through the launchd instance lost its tools (and with them file access, shell and skills, which Vibe runs as tool calls). The stub now runs from a copy in the bridge temp dir; the sandbox configuration is unchanged and no extra read access is granted. End to end with Layer 3 active (macOS): tool call, two parallel calls, follow-up turn, plain chat.
+- **fix(stub): `anthropic-tool-stub.mjs` starts when launched through a symlink** (its main guard compared `import.meta.url` with the unresolved `argv[1]`; `/var` links to `/private/var` on macOS).
+- **fix(anthropic): the bridge temp dir (`olp-tools-*`) no longer leaks** when a Layer 3 wrap fails, the consumer aborts or the spawn errors without `close`.
+- **fix(anthropic): the system prompt no longer says "you do NOT have access to any filesystem or shell" when a bridge is active.** The shorter wrapper names the tools as the way to the client's machine and declares tool results data, not instructions. Requests without a bridge keep the old wrapper.
+- **Not covered:** Linux/bwrap and long agent sessions under Layer 3 are not verified; `temperature`/`top_p` are not passed to the CLI; the follow-up turn is still text.
+
 ### Anthropic: spawn environment is an allowlist (ADR 0009 Amendment 4)
 
 - **fix(anthropic): the `claude` spawn no longer inherits the whole server environment.** A shell-started server sent 22,395 prompt tokens for a one-line request (32,762 with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` alone); now 493 regardless of the start path. Only process basics, proxy/CA settings and `CLAUDE_CODE_OAUTH_TOKEN` are forwarded; other variables of the server process (cloud keys, tokens) no longer reach the CLI unless the operator lists them. `ANTHROPIC_*` can not be passed through.

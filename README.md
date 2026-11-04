@@ -33,7 +33,7 @@ A request with `tools[]` is answered with real `tool_calls` (`finish_reason: "to
 - Requests with `tools[]` skip the response cache ([ADR 0005 Amendment 9](./docs/adr/0005-cache-cross-provider.md)).
 - `tool_choice: "none"` turns the bridge off; `"required"` or a named function is passed as a sentence in the system prompt (the CLI has no flag).
 - Aborted runs have no token counts: with `stream_options.include_usage` the usage chunk is an estimate.
-- Not supported: spawns wrapped by sandbox-runtime Layer 3 (bridge skipped, `tools[]` dropped).
+- Under sandbox-runtime Layer 3 the bridge works too: the stub runs from a copy in the OS temp dir, the sandbox configuration is unchanged ([ADR 0009 Amendment 5](./docs/adr/0009-interactive-mode-path-placeholder.md); verified on macOS, not on Linux). With a bridge the system prompt no longer tells the model it has no access; the tools act on the client's machine.
 
 Why this boundary matters:
 
@@ -627,7 +627,7 @@ The provider plugins' `crossTenantReadProtection` field declares **how** each pr
 
 **OLP_SANDBOX_DISABLED=1** env var disables Layer 3 (per-call sandbox-runtime wrapping) while preserving Layers 1+2+4. This is the post-Amendment 1 escape hatch retained for 1-2 releases; production deployments should leave it unset.
 
-**Layer 3 network policy.** A wrapped spawn can reach only the hosts declared in `ISOLATION.allowedDomains` of the wrapped providers (anthropic: `api.anthropic.com`; the proxies enforce the union of all wrapped providers' lists); every other outbound connection is denied by sandbox-runtime's local proxies, which start with the first wrapped spawn and run until OLP exits ([ADR 0014 Amendment 2](./docs/adr/0014-sandbox-runtime-integration.md), [ADR 0002 Amendment 11](./docs/adr/0002-plugin-architecture.md)). A wrapped provider without `allowedDomains` fails with `SPAWN_FAILED` naming the field. Spawns wrapped by Layer 3 run in the ephemeral home as cwd and still skip the client tool bridge (`tools[]` dropped).
+**Layer 3 network policy.** A wrapped spawn can reach only the hosts declared in `ISOLATION.allowedDomains` of the wrapped providers (anthropic: `api.anthropic.com`; the proxies enforce the union of all wrapped providers' lists); every other outbound connection is denied by sandbox-runtime's local proxies, which start with the first wrapped spawn and run until OLP exits ([ADR 0014 Amendment 2](./docs/adr/0014-sandbox-runtime-integration.md), [ADR 0002 Amendment 11](./docs/adr/0002-plugin-architecture.md)). A wrapped provider without `allowedDomains` fails with `SPAWN_FAILED` naming the field. Spawns wrapped by Layer 3 run in the ephemeral home as cwd; the client tool bridge works there too (stub copied to the OS temp dir, [ADR 0009 Amendment 5](./docs/adr/0009-interactive-mode-path-placeholder.md)).
 
 **Attribution vs isolation.** ADR 0007 multi-key auth provides **attribution** (per-key audit, per-key cache namespace, per-key provider gating). ADR 0014 Amendment 1 provides **isolation** (the security tier above). Both layer cleanly — attribution always operates; isolation tier is operator-selected per deployment.
 

@@ -102,6 +102,7 @@ import anthropic, {
   TOOL_BRIDGE_PREFIX,
   sanitizeToolNames,
   buildToolBridge,
+  TOOL_BRIDGE_SERVER,
   anthropicToolUsesFromEvent,
   toolUsesToIRToolCalls,
 } from './lib/providers/anthropic.mjs';
@@ -9844,6 +9845,8 @@ describe('D38 — maxConcurrent runtime enforcement (Suite 18)', () => {
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join as pathJoin } from 'node:path';
+import { tmpdir as tmpdirS43 } from 'node:os';
+import { readdirSync as readdirSyncS43, rmSync as rmSyncS43, symlinkSync as symlinkSyncS43, unlinkSync as unlinkSyncS43, statSync as statSyncS43 } from 'node:fs';
 import {
   createKey, listKeys, revokeKey, validateKey, touchLastUsed,
   generateToken, hashToken, validateManifest,
@@ -18692,6 +18695,114 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
       'every argument must round-trip through sh -c unchanged (no expansion, no splitting)');
   });
 
+  // ── 43s-43u: client tool bridge under Layer 3 (ADR 0009 Amendment 5) ─────
+  it('43t: anthropic with tools[] under Layer 3 runs the stub from a copy in the bridge temp dir (no extra sandbox read access)', async () => {
+    const inner = makeMockSpawnNDJSON(['ok']);
+    let seenArgs = null;
+    const wraps = [];
+    __setSpawnImpl((bin, args, opts) => { seenArgs = args; return inner(bin, args, opts); });
+    const ctx = {
+      ephemeralRoot: '/tmp/olp-spawn/k/r/home',
+      wrapForLayer3: async (cmd, ...rest) => { wraps.push({ cmd, rest }); return `WRAPPED<${cmd}>`; },
+      hardenedArgs: (a) => a,
+    };
+    try {
+      const tools = [{ type: 'function', function: { name: 'get_weather', description: 'x', parameters: { type: 'object', properties: {} } } }];
+      for await (const _ of anthropic.spawn(makeIR({ model: 'claude-sonnet-4-6', stream: true, tools, messages: [{ role: 'user', content: 'hi' }] }), { accessToken: '<fake>' }, ctx)) { /* drain */ }
+      const real = wraps[wraps.length - 1];
+      assert.ok(real.cmd.includes('--mcp-config') && real.cmd.includes('--strict-mcp-config'), 'bridge args must be in the wrapped command');
+      assert.ok(real.rest.length === 0, 'no extra sandbox options: the stub needs no read access beyond the temp dir');
+      assert.ok(/olp-tools-[^/]*\/anthropic-tool-stub\.mjs/.test(real.cmd), 'the stub runs from the bridge temp dir');
+      assert.ok(!real.cmd.includes('lib/providers/anthropic-tool-stub.mjs'), 'the checkout path (under the operator home) must not be used');
+      assert.ok(seenArgs[1].startsWith('WRAPPED<'), 'spawn goes through the wrapper');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  it('43t-2: buildToolBridge copies the stub next to the tool list and points --mcp-config at the copy', () => {
+    const br = buildToolBridge(makeIR({ model: 'm', tools: [{ type: 'function', function: { name: 'f', parameters: { type: 'object', properties: {} } } }], messages: [{ role: 'user', content: 'x' }] }));
+    try {
+      const copy = pathJoin(br.cleanupDir, 'anthropic-tool-stub.mjs');
+      assert.ok(fsExistsSync(copy), 'stub copy must exist in the bridge dir');
+      assert.ok(fsExistsSync(pathJoin(br.cleanupDir, 'tools.json')));
+      assert.equal(statSyncS43(copy).mode & 0o777, 0o600, 'the copy is private (run through node, no exec bit)');
+      const cfg = JSON.parse(br.args[br.args.indexOf('--mcp-config') + 1]);
+      assert.equal(cfg.mcpServers[TOOL_BRIDGE_SERVER].args[0], copy);
+    } finally {
+      rmSyncS43(br.cleanupDir, { recursive: true, force: true });
+    }
+  });
+
+  it('43t-2b: the copied stub answers tools/list when started through a symlinked path (macOS /var -> /private/var)', () => {
+    const br = buildToolBridge(makeIR({ model: 'm', tools: [{ type: 'function', function: { name: 'f', description: 'd', parameters: { type: 'object', properties: {} } } }], messages: [{ role: 'user', content: 'x' }] }));
+    try {
+      const cfg = JSON.parse(br.args[br.args.indexOf('--mcp-config') + 1]).mcpServers[TOOL_BRIDGE_SERVER];
+      const link = pathJoin(tmpdirS43(), `olp-stub-link-${process.pid}`);
+      symlinkSyncS43(br.cleanupDir, link);
+      try {
+        const viaLink = [pathJoin(link, 'anthropic-tool-stub.mjs'), pathJoin(link, 'tools.json')];
+        const r = _spawnSyncS36(cfg.command, viaLink, { input: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}\n', encoding: 'utf8' });
+        assert.ok(r.stdout.includes('"name":"f"'), `stub started via a symlink must answer; stdout=${r.stdout} stderr=${r.stderr}`.slice(0, 300));
+      } finally { unlinkSyncS43(link); }
+    } finally {
+      rmSyncS43(br.cleanupDir, { recursive: true, force: true });
+    }
+  });
+
+  it('43t-3: a failing Layer 3 wrap does not leave the bridge temp dir behind', async () => {
+    const count = () => readdirSyncS43(tmpdirS43()).filter((n) => n.startsWith('olp-tools-')).length;
+    const before = count();
+    __setSpawnImpl(makeMockSpawnNDJSON(['ok']));
+    let calls = 0;
+    const ctx = {
+      ephemeralRoot: '/tmp/olp-spawn/k/r/home',
+      wrapForLayer3: async (cmd) => { if (++calls === 2) throw new Error('wrap failed'); return `WRAPPED<${cmd}>`; },
+      hardenedArgs: (a) => a,
+    };
+    try {
+      const tools = [{ type: 'function', function: { name: 'f', parameters: { type: 'object', properties: {} } } }];
+      await assert.rejects(async () => {
+        for await (const _ of anthropic.spawn(makeIR({ model: 'claude-sonnet-4-6', stream: true, tools, messages: [{ role: 'user', content: 'hi' }] }), { accessToken: '<fake>' }, ctx)) { /* drain */ }
+      }, /wrap failed/);
+      assert.equal(count(), before, 'the olp-tools-* directory must be removed on the error path');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  it('43t-4: the bridge temp dir is removed when a hardening hook throws and after a finished request', async () => {
+    const count = () => readdirSyncS43(tmpdirS43()).filter((n) => n.startsWith('olp-tools-')).length;
+    const tools = [{ type: 'function', function: { name: 'f', parameters: { type: 'object', properties: {} } } }];
+    const ir = () => makeIR({ model: 'claude-sonnet-4-6', stream: true, tools, messages: [{ role: 'user', content: 'hi' }] });
+    const base = { ephemeralRoot: '/tmp/olp-spawn/k/r/home', wrapForLayer3: async (c) => c };
+    const before = count();
+    try {
+      // 1: hardening hook throws before the spawn
+      __setSpawnImpl(makeMockSpawnNDJSON(['ok']));
+      await assert.rejects(async () => {
+        for await (const _ of anthropic.spawn(ir(), { accessToken: '<fake>' }, { ...base, hardenedArgs: () => { throw new Error('hook failed'); } })) { /* drain */ }
+      }, /hook failed/);
+      assert.equal(count(), before, 'hook failure must not leak the dir');
+      // 3: normal completion
+      __setSpawnImpl(makeMockSpawnNDJSON(['ok']));
+      for await (const _ of anthropic.spawn(ir(), { accessToken: '<fake>' }, { ...base, hardenedArgs: (a) => a })) { /* drain */ }
+      assert.equal(count(), before, 'a finished request must not leave the dir behind');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  it('43u: with a tool bridge the system prompt no longer denies tool/filesystem access; without it the wrapper is unchanged', () => {
+    const plain = extractSystemPrompt({ messages: [{ role: 'system', content: 'CLIENT RULES' }] });
+    assert.ok(plain.includes('do NOT have access to any local filesystem'), 'default wrapper unchanged');
+    const tooled = extractSystemPrompt({ messages: [{ role: 'system', content: 'CLIENT RULES' }] }, { bridge: true });
+    assert.ok(!/do NOT have access/i.test(tooled), 'bridge wrapper must not tell the model it has no access');
+    assert.ok(tooled.includes('CLIENT RULES'), 'client system prompt is still appended');
+    assert.ok(/tools/i.test(tooled.split('CLIENT RULES')[0]), 'wrapper mentions the provided tools');
+    assert.ok(/data, not (as )?instructions/i.test(tooled), 'tool results are declared data, not instructions (prompt-injection guard)');
+  });
+
   // ── 43p-43r: behaviour against the REAL sandbox-runtime (child process) ──
   //
   // The library keeps process-wide state (signal handlers, proxy listeners), so
@@ -20743,19 +20854,30 @@ describe('Client tool bridge: spawn (ADR 0009 Amendment 2)', () => {
     assert.equal(chunks[0].content, 'ohne Tool');
   });
 
-  it('Layer 3 wrapped spawn: the bridge is skipped and tools[] is dropped as before', async () => {
+  it('an aborting consumer removes the bridge temp dir even though the CLI never closes (generator finally)', async () => {
+    const count = () => readdirSyncS43(tmpdirS43()).filter((n) => n.startsWith('olp-tools-')).length;
+    const before = count();
+    __setSpawnImpl(makeLiveSpawn([
+      { type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'Hallo' }] } },
+    ]));
+    try {
+      for await (const _ of anthropic.spawn(baseIR(), AUTH, { ephemeralRoot: '/tmp/olp-spawn/k/r/home', wrapForLayer3: async (c) => c, hardenedArgs: (a) => a })) { break; }
+      assert.equal(count(), before, 'abort must not leave the olp-tools-* dir behind');
+    } finally { __resetSpawnImpl(); }
+  });
+
+  it('Layer 3 wrapped spawn: the bridge stays active and the tool call is returned (ADR 0009 Amendment 5)', async () => {
     const cap = {};
     const chunks = await collect(baseIR(), makeLiveSpawn([
       toolUse('toolu_1', 'Berlin'),
-      { type: 'assistant', message: { id: 'msg_2', content: [{ type: 'text', text: 'Text' }] } },
       { type: 'result', subtype: 'success', is_error: false },
-    ], { capture: cap }), {
+    ], { capture: cap, closeAfter: true }), {
       wrapForLayer3: async (bin) => `/usr/bin/env ${bin}`,
       envOverrides: {}, hardenedArgs: (a) => a, cleanup: async () => {},
     });
     assert.equal(cap.bin, '/bin/sh');
-    assert.ok(!JSON.stringify(cap.args).includes('mcp-config'));
-    assert.ok(chunks.every(c => !c.tool_calls), 'no tool_calls without the bridge');
-    assert.equal(chunks.at(-1).finish_reason, 'stop');
+    assert.ok(JSON.stringify(cap.args).includes('mcp-config'), 'bridge args travel through the wrapper');
+    assert.equal(chunks.at(-1).finish_reason, 'tool_calls');
+    assert.equal(chunks.find(c => c.tool_calls).tool_calls[0].id, 'toolu_1');
   });
 });
