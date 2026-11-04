@@ -4,6 +4,12 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Anthropic: no built-in tools in the request (ADR 0009 Amendment 3)
+
+- **fix(anthropic): spawns without a tool bridge now pass `--tools ""`.** A one-line request cost 14,955 prompt tokens; with the flag it costs 495 (claude CLI 2.1.304). `--system-prompt` replaced only the prompt text, the CLI's built-in tool definitions (about 14.4k tokens) were still sent. README § Layer 4 no longer claims the model gets no tool descriptions.
+- **Not covered:** `buildSpawnEnv` still forwards the whole process environment; a shell-started server with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` measured 32,762 tokens. Separate change (Layer 1).
+- **test:** `buildCliArgs` passes `--tools ""` exactly once, with and without a bridge.
+
 ### Layer 3 sandbox: anthropic spawns work again (ADR 0014 Amendment 2, ADR 0002 Amendment 11)
 
 - **fix(sandbox): every anthropic spawn failed with `An unknown error occurred (Unexpected)` once Layer 3 was active** (server start 2026-11-02 19:18 UTC: 56 of 56 requests failed, 0 succeeded; Vibe via `olp:*` models got HTTP 502). Four defects, each reproduced on its own:

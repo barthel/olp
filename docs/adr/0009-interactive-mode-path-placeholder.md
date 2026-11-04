@@ -349,3 +349,35 @@ Details:
 - claude CLI 2.1.304 `--help` § `--mcp-config`, `--strict-mcp-config`, `--tools`, `--allowedTools`, `--output-format stream-json`.
 - `docs/spikes/2026-11-02-client-tool-bridge.md` (observed event order, tool-use ids, parallel calls, replay behaviour).
 - OpenAI tool-calling flow: client executes tools (https://platform.openai.com/docs/guides/function-calling).
+
+## Amendment 3 — 2026-11-04: Built-in tools off for every anthropic spawn
+
+### Trigger
+
+A one-line request ("answer only: ok") reported about 14.9k prompt tokens (Mistral Vibe via launchd; 22.4k from a dev instance started in a shell).
+
+### Measurement (claude CLI 2.1.304, OLP v0.7.0, same request, unique text per run)
+
+| Spawn | prompt_tokens |
+|---|---|
+| as shipped (launchd environment) | 14,955 |
+| same plus `--tools ""` | 495 |
+| shell environment inherited (dev instance) | 22,395 |
+| launchd environment plus `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` | 32,762 |
+
+`--system-prompt` replaces the prompt text only. The CLI still registered its built-in tool definitions (about 14.4k tokens, derived from the difference to `--tools ""`; the definitions themselves were not inspected). The statement in README § Layer 4 that the model "receives no tool descriptions" was therefore wrong. Not measured: the split of the prompt tokens into cache creation and cache read.
+
+### Decision
+
+`buildCliArgs` adds `--tools ""` whenever no client tool bridge is active. The bridge args already carry it (Amendment 2). One flag, no duplicate. The built-in tools are not wanted behind the proxy: OLP is not a tool runtime, and a tool the model cannot call is a stronger Layer 4 than a sentence asking it not to.
+
+### Consequences
+
+- About 14.4k fewer prompt tokens per anthropic request.
+- Hardening no longer depends on the model following the system prompt.
+- Out of scope, separate change: `buildSpawnEnv` forwards the whole process environment, so a server started from a shell with Claude variables (for example `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS`) sends far more tokens (last row above). An environment allowlist belongs to Layer 1 and is handled on its own.
+
+### Authority citations
+
+- claude CLI 2.1.304 `--help` § `--tools <tools...>`: "Use \"\" to disable all tools".
+- Measurements above (reproducible: dev instance on another port, `OLP_CLAUDE_BIN` wrapper appending `--tools ""`).

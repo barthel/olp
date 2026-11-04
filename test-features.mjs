@@ -18725,7 +18725,7 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
       writeFileSync(bin, '#!/bin/sh\\nfor a in "$@"; do printf "%s\\\\0" "$a"; done\\n');
       chmodSync(bin, 0o755);
       const prompt = 'Hallo Welt! Wie geht\\'s? "zitiert" $HOME \`id\` !! \\\\n\\nZeile2';
-      const args = ['--model', 'm', '--system-prompt', prompt, '--verbose'];
+      const args = ['--model', 'm', '--system-prompt', prompt, '--tools', '', '--verbose'];
       const ctx = await prepareIsolatedEnvironment({ provider: ${_childProviderSrcS43()}, keyId: 'k43q', reqId: 'r43q' });
       const { line, env } = layer3CommandLine(bin, args);
       const wrapped = await ctx.wrapForLayer3(line);
@@ -20458,6 +20458,18 @@ describe('Client tool bridge: names, args, prompt (ADR 0009 Amendment 2)', () =>
     const withBridge = buildCliArgs('claude-sonnet-4-6', 'SYS', { args: ['--mcp-config', '{}'], systemSuffix: 'DO IT' });
     assert.equal(withBridge[withBridge.indexOf('--system-prompt') + 1], 'SYS\n\nDO IT');
     assert.deepEqual(withBridge.slice(-2), ['--mcp-config', '{}']);
+  });
+
+  it('buildCliArgs: without a bridge the CLI built-in tools are switched off (--tools "" exactly once)', () => {
+    // Measured on claude 2.1.304: the built-in tool definitions are ~14.4k of
+    // ~14.9k prompt tokens for a one-line request; --tools "" removes them.
+    const plain = buildCliArgs('claude-sonnet-4-6', 'SYS');
+    const i = plain.indexOf('--tools');
+    assert.ok(i !== -1, 'plain spawn must pass --tools');
+    assert.equal(plain[i + 1], '', '--tools value must be the empty string');
+    assert.equal(plain.filter((a) => a === '--tools').length, 1);
+    const withBridge = buildCliArgs('claude-sonnet-4-6', 'SYS', { args: ['--tools', '', '--mcp-config', '{}'], systemSuffix: '' });
+    assert.equal(withBridge.filter((a) => a === '--tools').length, 1, 'bridge already carries --tools; no duplicate');
   });
 
   it('anthropicToolUsesFromEvent only returns bridge tool_use blocks of assistant events', () => {

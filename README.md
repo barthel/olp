@@ -43,7 +43,7 @@ Why this boundary matters:
 
 A few clients (notably OpenClaw in certain configurations) can be wired to route their tool calls *through* the OLP server host rather than executing them locally. This is a client configuration choice, not an OLP feature, and it produces surprising self-check results (the agent describes the OLP server, not your machine). See [§ Known limitations](#known-limitations) for the integrator-level guidance.
 
-For the multi-tenant isolation story, [ADR 0014 Amendment 1](./docs/adr/0014-sandbox-runtime-integration.md) defines a four-layer architecture: each provider-CLI spawn gets a per-request ephemeral `$HOME` (`/tmp/olp-spawn/<keyId>/<reqId>/home/`) with credential files symlinked in, plus per-provider tool-hardening (anthropic's `--system-prompt` suppresses Read/Bash tool descriptions; codex defaults to `--sandbox read-only`). The canonical contract lives in [ADR 0002 Amendment 9](./docs/adr/0002-plugin-architecture.md) (Provider ISOLATION contract) + [ADR 0014 Amendment 1](./docs/adr/0014-sandbox-runtime-integration.md). The full "Security Model" reference will land in a Phase 7 close PR (Task #10).
+For the multi-tenant isolation story, [ADR 0014 Amendment 1](./docs/adr/0014-sandbox-runtime-integration.md) defines a four-layer architecture: each provider-CLI spawn gets a per-request ephemeral `$HOME` (`/tmp/olp-spawn/<keyId>/<reqId>/home/`) with credential files symlinked in, plus per-provider tool-hardening (anthropic's `--tools ""` removes the CLI built-in tools; codex defaults to `--sandbox read-only`). The canonical contract lives in [ADR 0002 Amendment 9](./docs/adr/0002-plugin-architecture.md) (Provider ISOLATION contract) + [ADR 0014 Amendment 1](./docs/adr/0014-sandbox-runtime-integration.md). The full "Security Model" reference will land in a Phase 7 close PR (Task #10).
 
 ---
 
@@ -612,7 +612,7 @@ OLP's multi-tenant isolation has **three deployment tiers**, each suited to a di
 
 | Tier | Trust assumption | Mechanism | Suitable for |
 |---|---|---|---|
-| **shared-os-user** (default) | All OLP key holders trust each other (family / personal pool) | Per-spawn ephemeral `$HOME` (Layer 1) + symlinked credentials (Layer 2) + provider tool-suppression (Layer 4 — anthropic Phase 6c `--system-prompt`, codex `--sandbox read-only`) | Family LAN, personal multi-device, trusted small teams. ADR 0001 § Mission. |
+| **shared-os-user** (default) | All OLP key holders trust each other (family / personal pool) | Per-spawn ephemeral `$HOME` (Layer 1) + symlinked credentials (Layer 2) + provider tool-suppression (Layer 4 — anthropic `--tools ""` ([ADR 0009 Amendment 3](./docs/adr/0009-interactive-mode-path-placeholder.md)), codex `--sandbox read-only`) | Family LAN, personal multi-device, trusted small teams. ADR 0001 § Mission. |
 | **per-os-user** | Trust boundaries between OLP keys (e.g., distinct family members on a shared host) | All of the above + per-OLP-key OS user (systemd `User=olp-<keyId>`, separate uid for kernel-level fs deny) | Untrusted-key deploy that still pools OAuth subscription. Operator-managed. |
 | **separate-vm** | Adversarial isolation between OLP keys (commercial / public-demo scenarios) | All of the above + dedicated VM per OLP key | OLP outside its stated mission. Each provider plugin's `recommendedDeploymentTier` declares its minimum acceptable tier. |
 
@@ -620,7 +620,7 @@ The provider plugins' `crossTenantReadProtection` field declares **how** each pr
 
 | Provider | `crossTenantReadProtection` | Mechanism |
 |---|---|---|
-| anthropic (claude CLI) | `tool-suppression` | Phase 6c `--system-prompt` replaces claude's default system prompt; the model receives no tool descriptions for Read/Bash/etc., so prompt-injection produces no `tool_use` to read other tenants' files. |
+| anthropic (claude CLI) | `tool-suppression` | `--tools ""` removes all CLI built-in tools from the request (ADR 0009 Amendment 3), so the model has no Read/Bash tool to call and the ~14.4k prompt tokens of their definitions are not sent. `--system-prompt` only replaces the prompt text; before Amendment 3 the tool definitions were still sent and only a sentence told the model not to use them. |
 | codex (codex CLI) | `inner-sandbox` | codex's own bubblewrap-based `--sandbox read-only` default confines shell-tool reads to its inner sandbox view. |
 | mistral (vibe CLI) | `none` | No tool-suppression flag known on vibe at present. Recommended deployment tier `separate-vm` until a hardening regime is verified (Task #4 follow-up spike). |
 
