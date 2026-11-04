@@ -95,6 +95,7 @@ import anthropic, {
   OLP_SYSTEM_PROMPT_WRAPPER,
   extractSystemPrompt,
   buildCliArgs,
+  buildSpawnEnv as buildAnthropicSpawnEnv,
   parseStreamJsonLines,
   anthropicStreamJsonEventToIR,
   // ADR 0009 Amendment 2 — client tool bridge
@@ -17969,8 +17970,8 @@ describe('Suite 41 — ADR 0009 Amendment 1: stream-json transport (Phase 6)', (
   // refresh: with env var present, claude never reads credentials.json,
   // so expired accessTokens are never swapped via refreshToken. Result:
   // hard 401 cascade every ~8h requiring manual keychain copy.
-  // Fix: don't inject. Spawned process inherits process.env via
-  // buildSpawnEnv; the CLI handles file + refresh natively.
+  // Fix: don't inject. Spawned process gets the allowlisted
+  // process.env via buildSpawnEnv (CLAUDE_CODE_OAUTH_TOKEN included); the CLI handles file + refresh natively.
 
   it('41h: _spawnAndStream does NOT set env.CLAUDE_CODE_OAUTH_TOKEN when only file/keychain auth available', async () => {
     // Capture the env passed to spawn
@@ -18028,6 +18029,51 @@ describe('Suite 41 — ADR 0009 Amendment 1: stream-json transport (Phase 6)', (
       if (sentinel === undefined) delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
       else process.env.CLAUDE_CODE_OAUTH_TOKEN = sentinel;
     }
+  });
+});
+
+// ── Suite 41i — anthropic spawn environment is an allowlist ─────────────────
+// ADR 0009 Amendment 4. The CLI changes behaviour with its own env variables
+// (measured: CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1 raised a one-line request
+// from 495 to ~32k prompt tokens), so the spawn gets only what it needs.
+describe('Suite 41i — anthropic spawn env allowlist', () => {
+  const noisy = {
+    PATH: '/usr/bin', HOME: '/h', LANG: 'de_DE.UTF-8', LC_ALL: 'C', TZ: 'UTC', TMPDIR: '/t',
+    HTTPS_PROXY: 'http://p:1', https_proxy: 'http://p:1', NO_PROXY: 'x', NODE_EXTRA_CA_CERTS: '/ca.pem', SSL_CERT_FILE: '/c.pem',
+    CLAUDE_CODE_OAUTH_TOKEN: 'tok', CLAUDE_CONFIG_DIR: '/acct', CLAUDE_CODE_OAUTH_CLIENT_ID: 'cid',
+    CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: '1', DISABLE_PROMPT_CACHING: '1', CLAUDE_CODE_ENTRYPOINT: 'cli',
+    CLAUDE_EFFORT: 'max', CLAUDE_CODE_SESSION_ID: 's', CLAUDECODE: '1', ANTHROPIC_API_KEY: 'k', ANTHROPIC_BASE_URL: 'u',
+    ANTHROPIC_AUTH_TOKEN: 'a', MCP_TIMEOUT: '5', AWS_SECRET_ACCESS_KEY: 'shh', GITHUB_TOKEN: 'ghp',
+  };
+
+  it('41i-1: variables that change CLI behaviour or carry unrelated secrets are not forwarded', () => {
+    const env = buildAnthropicSpawnEnv(noisy);
+    for (const k of ['CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS', 'DISABLE_PROMPT_CACHING', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_EFFORT',
+      'CLAUDE_CODE_SESSION_ID', 'CLAUDECODE', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_CLIENT_ID', 'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_AUTH_TOKEN', 'MCP_TIMEOUT',
+      'AWS_SECRET_ACCESS_KEY', 'GITHUB_TOKEN']) {
+      assert.equal(env[k], undefined, `${k} must not reach the CLI`);
+    }
+  });
+
+  it('41i-2: process basics, proxy/CA settings and the explicit auth variables are forwarded', () => {
+    const env = buildAnthropicSpawnEnv(noisy);
+    for (const k of ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TZ', 'TMPDIR', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY',
+      'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'CLAUDE_CODE_OAUTH_TOKEN']) {
+      assert.equal(env[k], noisy[k], `${k} must be forwarded unchanged`);
+    }
+  });
+
+  it('41i-4: the never-forward list wins over the passthrough list', () => {
+    const env = buildAnthropicSpawnEnv({ ...noisy, OLP_ANTHROPIC_ENV_PASSTHROUGH: 'ANTHROPIC_API_KEY,ANTHROPIC_BASE_URL,CLAUDECODE' });
+    for (const k of ['ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDECODE']) assert.equal(env[k], undefined, k);
+  });
+
+  it('41i-3: OLP_ANTHROPIC_ENV_PASSTHROUGH names extra variables to forward (operator opt-in)', () => {
+    const env = buildAnthropicSpawnEnv({ ...noisy, OLP_ANTHROPIC_ENV_PASSTHROUGH: ' CLAUDE_CODE_USE_BEDROCK , AWS_REGION', CLAUDE_CODE_USE_BEDROCK: '1', AWS_REGION: 'eu-central-1' });
+    assert.equal(env.CLAUDE_CODE_USE_BEDROCK, '1');
+    assert.equal(env.AWS_REGION, 'eu-central-1');
+    assert.equal(env.GITHUB_TOKEN, undefined, 'names not listed stay out');
+    assert.equal(env.OLP_ANTHROPIC_ENV_PASSTHROUGH, undefined, 'the control variable itself is not forwarded');
   });
 });
 

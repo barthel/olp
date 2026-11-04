@@ -4,6 +4,13 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Anthropic: spawn environment is an allowlist (ADR 0009 Amendment 4)
+
+- **fix(anthropic): the `claude` spawn no longer inherits the whole server environment.** A shell-started server sent 22,395 prompt tokens for a one-line request (32,762 with `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` alone); now 493 regardless of the start path. Only process basics, proxy/CA settings and `CLAUDE_CODE_OAUTH_TOKEN` are forwarded; other variables of the server process (cloud keys, tokens) no longer reach the CLI unless the operator lists them. `ANTHROPIC_*` can not be passed through.
+- **feat: `OLP_ANTHROPIC_ENV_PASSTHROUGH`** lists extra variable names to forward (Bedrock/Vertex setups). Documented in README § Environment Variables.
+- **Behaviour change:** operators who relied on other variables reaching the CLI must list them there. launchd setups with `PATH`/`OLP_*` only are unaffected.
+- **Not covered:** codex and mistral keep their own environment handling.
+
 ### Anthropic: no built-in tools in the request (ADR 0009 Amendment 3)
 
 - **fix(anthropic): spawns without a tool bridge now pass `--tools ""`.** A one-line request cost 14,955 prompt tokens; with the flag it costs 495 (claude CLI 2.1.304). `--system-prompt` replaced only the prompt text, the CLI's built-in tool definitions (about 14.4k tokens) were still sent. README § Layer 4 no longer claims the model gets no tool descriptions.

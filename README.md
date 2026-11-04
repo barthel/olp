@@ -409,6 +409,7 @@ _placeholder — full table lands per-phase as variables are introduced._
 | `OLP_OWNER_TOKEN` | (none) | Fallback used by `olp` CLI if `OLP_API_KEY` is absent. |
 | `OLP_PROXY_URL` | `http://127.0.0.1:$OLP_PORT` | Override target URL for `olp` CLI subcommands (so the same binary works against a remote OLP via SSH tunnel or direct LAN). |
 | `OLP_CLAUDE_BIN` | `claude` (from PATH) | Override path to the `claude` binary (Anthropic provider). Useful when multiple `claude` installs are present. |
+| `OLP_ANTHROPIC_ENV_PASSTHROUGH` | unset | Comma-separated names of extra environment variables forwarded to the `claude` CLI. The spawn otherwise gets only process basics (`PATH`, `HOME`, `LANG`, `LC_*`, ...), proxy and CA settings, and `CLAUDE_CODE_OAUTH_TOKEN` ([ADR 0009 Amendment 4](./docs/adr/0009-interactive-mode-path-placeholder.md)). Needed for Bedrock/Vertex style setups, e.g. `CLAUDE_CODE_USE_BEDROCK,AWS_REGION`. `ANTHROPIC_*` can not be passed through. |
 | `OLP_CODEX_BIN` | `codex` (from PATH) | Override path to the `codex` binary (OpenAI provider). |
 | `OLP_VIBE_BIN` | `vibe` (from PATH) | Override path to the `vibe` binary (Mistral provider). |
 

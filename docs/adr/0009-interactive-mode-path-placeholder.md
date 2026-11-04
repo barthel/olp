@@ -381,3 +381,27 @@ A one-line request ("answer only: ok") reported about 14.9k prompt tokens (Mistr
 
 - claude CLI 2.1.304 `--help` § `--tools <tools...>`: "Use \"\" to disable all tools".
 - Measurements above (reproducible: dev instance on another port, `OLP_CLAUDE_BIN` wrapper appending `--tools ""`).
+
+## Amendment 4 — 2026-11-04: Spawn environment is an allowlist (anthropic)
+
+### Trigger
+
+Amendment 3 left open that `buildSpawnEnv` forwarded the whole server environment. A server started from a shell with Claude variables sent 22,395 prompt tokens for the one-line request; `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` alone gave 32,762 (launchd environment: 14,955 before Amendment 3). The same forwarding handed every variable of the server process (cloud keys, tokens) to the CLI.
+
+### Decision
+
+`buildSpawnEnv(source)` forwards only: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`, `TERM`, `TZ`, `TMPDIR`, `LANG`, `LANGUAGE`, `LC_*`; `HTTP(S)_PROXY`, `ALL_PROXY`, `NO_PROXY` (both cases); `SSL_CERT_FILE`, `SSL_CERT_DIR`, `NODE_EXTRA_CA_CERTS`; `CLAUDE_CODE_OAUTH_TOKEN`. `CLAUDE_CONFIG_DIR` is not forwarded: the CLI does not honor it (ISOLATION comment, ADR 0002 Amendment 9) and it could point the spawn away from the ephemeral HOME. `CLAUDE_CODE_OAUTH_CLIENT_ID` is used by OLP's own refresh, not by the spawn. `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN` and `CLAUDECODE` stay removed, also when listed as passthrough. `OLP_ANTHROPIC_ENV_PASSTHROUGH` (comma separated names) adds variables for operators who need them (Bedrock, Vertex). Layer 1 `envOverrides` keep final precedence as before.
+
+### Consequences
+
+- The measured token count no longer depends on how the server was started (shell: 493, launchd: 492 after Amendments 3 and 4).
+- Behaviour change for operators who relied on other variables reaching the CLI: they must list them in `OLP_ANTHROPIC_ENV_PASSTHROUGH`. launchd setups of this repo set `PATH` and `OLP_*` only and are unaffected.
+- Other variables still reach the CLI by design: `CLAUDE_CODE_OAUTH_TOKEN` from the server environment (unless an account token replaces it), Layer 1 `envOverrides`, and whatever the operator lists in `OLP_ANTHROPIC_ENV_PASSTHROUGH`. `ANTHROPIC_*` cannot be passed through, so Bedrock/Vertex setups that need `ANTHROPIC_BASE_URL` are not supported by this switch.
+- Not forwarded and not needed so far (no evidence of a problem): `XDG_*`, `TEMP`/`TMP`, `NODE_OPTIONS`, `NODE_TLS_REJECT_UNAUTHORIZED`, `SSH_AUTH_SOCK`, Windows variables. Use the passthrough list if one is needed.
+- codex and mistral keep their own `buildSpawnEnv`; not changed here.
+- Which variable names exist in the CLI is not documented in one place; the allowlist is derived from what the spawn needs (process, network, auth), not from a list of harmful names.
+
+### Authority citations
+
+- Measurements above (dev instance, same request, environment varied).
+- claude CLI 2.1.304 environment handling: observed behaviour only; no CLI documentation page was found that lists these variables, so this amendment rests on measurement.
