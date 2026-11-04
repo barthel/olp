@@ -4,6 +4,18 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Layer 3 sandbox: anthropic spawns work again (ADR 0014 Amendment 2, ADR 0002 Amendment 11)
+
+- **fix(sandbox): every anthropic spawn failed with `An unknown error occurred (Unexpected)` once Layer 3 was active** (server start 2026-11-02 19:18 UTC: 56 of 56 requests failed, 0 succeeded; Vibe via `olp:*` models got HTTP 502). Four defects, each reproduced on its own:
+  - `network.allowedDomains: []` means no network in sandbox-runtime. New `ISOLATION.allowedDomains` (anthropic: `api.anthropic.com`); a wrapped provider without it throws `SPAWN_FAILED` naming the field.
+  - The network policy is process-wide in sandbox-runtime and its proxies start only in `initialize()`. `SandboxManager.initialize()` now runs lazily on the first wrap with the union of the wrapped providers' hosts, widened by `updateConfig()`.
+  - `anthropic.spawn()` wrapped only the binary path, so `--model`, `--output-format stream-json`, `--system-prompt` and the hardened args were dropped (plain-text output, empty completions, no tool-suppression prompt). The wrapper now gets the whole quoted command line (`shellJoin`).
+  - The spawn inherited the server cwd (a checkout under `$HOME`), unreadable under Layer 3's `denyRead: [$HOME]`. anthropic spawns now run with `cwd = ephemeral home`.
+- **fix(sandbox): SIGINT/SIGTERM end the server again after the first wrapped spawn** (found in review). sandbox-runtime's `initialize()` registers signal handlers that reset the proxies but never exit, so `launchctl stop` and Ctrl-C were swallowed. The manager now exits with 130/143 one tick after the library's cleanup.
+- **fix(anthropic): the system prompt reaches the CLI unchanged under Layer 3** (found in review). sandbox-runtime re-quotes the command and turned every `!` into `\!`; the prompt now travels in `OLP_SYSTEM_PROMPT` (`layer3CommandLine`).
+- **test:** Suite 43 gains 43i-43r (allowlist pass-through, missing declaration with error code, anthropic declaration, lazy initialize/updateConfig union, parallel first wraps and retry after a failed initialize, full command line, shell quoting round trip, cwd, signal exit and prompt round trip against the real library in a child process) plus the `__setSandboxManagerForTests` seam. Mutation-checked: dropping the env transport turns 43q red with `Hallo Welt\!`, dropping the retry reset turns 43r red.
+- **Not covered:** spawns wrapped by Layer 3 still drop `tools[]` (no tool bridge); the OAuth refresh host of default-login accounts is not on the allowlist and untested (token accounts are unaffected, ADR 0014 Amendment 2 § A2.3); codex has the same `sh -c <wrapped bin>` shape but is never wrapped. Operators who set `OLP_SANDBOX_DISABLED=1` as a workaround can remove it.
+
 ### Client tool calls: anthropic bridge (PR C of 3)
 
 - **feat(anthropic): `tools[]` answered with `tool_calls`** — With a non-empty `tools[]` the spawn registers the tools as an MCP stub (`lib/providers/anthropic-tool-stub.mjs`, `--mcp-config`, `--strict-mcp-config`, `--tools ""`, `--allowedTools`), collects the model's `tool_use` events of one message (idle window `hints.toolCallIdleMs`, default 400 ms), terminates the CLI and returns `tool_calls` with `finish_reason: "tool_calls"`. Tool names are sanitized to `[a-zA-Z0-9_-]{1,64}` and mapped back. Authority: claude CLI 2.1.304 § `--mcp-config`, `--strict-mcp-config`, `--tools`, `--allowedTools`; ADR 0009 Amendment 2; `docs/spikes/2026-11-02-client-tool-bridge.md`.

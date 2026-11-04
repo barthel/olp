@@ -4599,6 +4599,7 @@ import {
   isSandboxActive,
   prepareIsolatedEnvironment,
   __resetSandboxManagerForTests as _resetSandboxMgr,
+  __setSandboxManagerForTests as _setSandboxMgr,
 } from './lib/sandbox/manager.mjs';
 
 // ── Phase 2 / D45+D46 server-side default override ────────────────────────
@@ -18472,6 +18473,335 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
       __resetAuthConfig();
     }
   });
+
+  // ── 43i-43k: Layer 3 network policy comes from the provider ISOLATION block ──
+  //
+  // Regression for the 2026-11-02 outage: manager.mjs passed
+  // `network.allowedDomains: []` to wrapWithSandbox(). In sandbox-runtime an empty
+  // allowlist means NO network ("An empty allowedDomains list means no network
+  // access", README § Network Isolation), so every wrapped `claude` spawn could not
+  // reach api.anthropic.com and exited with "An unknown error occurred (Unexpected)".
+  //
+  // Authority:
+  //   @anthropic-ai/sandbox-runtime v0.0.52 README § Network Isolation + § Configuration
+  //     (`network.allowedDomains` — empty array = no network access)
+  //   OLP ADR 0014 Amendment 1 § A1.2.3 (Layer 3 per-spawn customConfig)
+
+  function _isolatedMock(extra = {}) {
+    return {
+      name: 'mock-l3',
+      ISOLATION: {
+        ephemeralEnvOverrides: ({ ephemeralRoot }) => ({ HOME: ephemeralRoot }),
+        credentialMounts: [],
+        requiredHomePaths: [],
+        hasInnerSandbox: false,
+        crossTenantReadProtection: 'none',
+        recommendedDeploymentTier: 'separate-vm',
+        ...extra,
+      },
+    };
+  }
+
+  it('43i: Layer 3 passes the provider-declared allowedDomains to wrapWithSandbox', async () => {
+    await _resetSandboxMgr();
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let seen = null;
+    _setSandboxMgr({
+      initialize: async () => {},
+      wrapWithSandbox: async (cmd, _shell, customConfig) => { seen = customConfig; return `wrapped:${cmd}`; },
+    });
+    try {
+      const env = await prepareIsolatedEnvironment({
+        provider: _isolatedMock({ allowedDomains: ['api.example.test', '*.example.test'] }),
+        keyId: 'test-key-43i',
+        reqId: 'test-req-43i',
+      });
+      const out = await env.wrapForLayer3('echo hi');
+      assert.equal(out, 'wrapped:echo hi', 'command must go through wrapWithSandbox');
+      assert.deepEqual(seen.network.allowedDomains, ['api.example.test', '*.example.test'],
+        'customConfig.network.allowedDomains must equal the provider declaration');
+      await env.cleanup();
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      await _resetSandboxMgr();
+    }
+  });
+
+  it('43j: a provider wrapped by Layer 3 without allowedDomains fails loudly (no silent no-network spawn)', async () => {
+    await _resetSandboxMgr();
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    _setSandboxMgr({ wrapWithSandbox: async (cmd) => cmd });
+    try {
+      await assert.rejects(
+        () => prepareIsolatedEnvironment({
+          provider: _isolatedMock(),   // no allowedDomains declared
+          keyId: 'test-key-43j',
+          reqId: 'test-req-43j',
+        }),
+        (e) => e?.code === 'SPAWN_FAILED' && /ISOLATION\.allowedDomains/.test(e.message),
+        'error must be SPAWN_FAILED and name the missing ISOLATION.allowedDomains field',
+      );
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      await _resetSandboxMgr();
+    }
+  });
+
+  it('43k: anthropic ISOLATION declares api.anthropic.com in allowedDomains', () => {
+    assert.ok(Array.isArray(anthropicIsolationS45.allowedDomains),
+      'anthropic ISOLATION.allowedDomains must be an array');
+    assert.ok(anthropicIsolationS45.allowedDomains.includes('api.anthropic.com'),
+      'anthropic spawns must be able to reach api.anthropic.com from inside the Layer 3 sandbox');
+  });
+
+  // ── 43m: the network allowlist is enforced by sandbox-runtime's proxies ──
+  //
+  // sandbox-runtime filters against the process-wide config and only starts its
+  // HTTP/SOCKS proxies in initialize(). Without initialize() the wrapped command
+  // has network restricted but no proxy to route through, so the CLI hangs
+  // (observed 2026-11-04: spawn blocked > 90 s). The allowlist is therefore the
+  // union of the wrapped providers' declarations, initialized once and widened
+  // with updateConfig() when another provider adds hosts.
+  // Authority: @anthropic-ai/sandbox-runtime v0.0.52 dist/sandbox/sandbox-manager.js
+  //   initialize() (starts proxies, stores global config), updateConfig().
+
+  it('43m: Layer 3 initializes the SandboxManager once with the allowlist union before wrapping', async () => {
+    await _resetSandboxMgr();
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    const calls = [];
+    _setSandboxMgr({
+      initialize: async (cfg) => { calls.push(['initialize', [...cfg.network.allowedDomains]]); },
+      updateConfig: (cfg) => { calls.push(['updateConfig', [...cfg.network.allowedDomains]]); },
+      wrapWithSandbox: async (cmd) => { calls.push(['wrap']); return cmd; },
+    });
+    try {
+      const a = await prepareIsolatedEnvironment({
+        provider: _isolatedMock({ allowedDomains: ['a.example.test'] }), keyId: 'k43m', reqId: 'r1' });
+      await a.wrapForLayer3('x');
+      const a2 = await prepareIsolatedEnvironment({
+        provider: _isolatedMock({ allowedDomains: ['a.example.test'] }), keyId: 'k43m', reqId: 'r2' });
+      await a2.wrapForLayer3('x');
+      const b = await prepareIsolatedEnvironment({
+        provider: _isolatedMock({ allowedDomains: ['b.example.test'] }), keyId: 'k43m', reqId: 'r3' });
+      await b.wrapForLayer3('x');
+      assert.deepEqual(calls, [
+        ['initialize', ['a.example.test']],
+        ['wrap'],
+        ['wrap'],
+        ['updateConfig', ['a.example.test', 'b.example.test']],
+        ['wrap'],
+      ], 'initialize once, no re-init for known hosts, updateConfig with the union for new hosts');
+      await a.cleanup(); await a2.cleanup(); await b.cleanup();
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      await _resetSandboxMgr();
+    }
+  });
+
+  // ── 43n/43o: Layer 3 must wrap the whole command line, not just the binary ──
+  //
+  // Regression: the Layer 3 branch of anthropic.spawn() passed only the wrapped
+  // *binary path* to `sh -c`; args (--model, --output-format stream-json,
+  // --system-prompt, hardened args) were dropped. The CLI then ran with its
+  // defaults: plain-text output ("NDJSON parse error on line: ok", empty
+  // completion) and without the Layer 4 tool-suppression system prompt.
+
+  it('43n: anthropic spawn under Layer 3 hands the full command line (bin + args) to the wrapper', async () => {
+    const inner = makeMockSpawnNDJSON(['ok']);
+    let seenBin = null, seenArgs = null;
+    const wraps = [];
+    __setSpawnImpl((bin, args, opts) => { seenBin = bin; seenArgs = args; return inner(bin, args, opts); });
+    try {
+      const ir = makeIR({
+        model: 'claude-sonnet-4-6',
+        stream: true,
+        messages: [{ role: 'user', content: "it's a test" }],
+      });
+      const ctx = {
+        ephemeralRoot: '/tmp/olp-spawn/k/r/home',
+        wrapForLayer3: async (cmd) => { wraps.push(cmd); return `WRAPPED<${cmd}>`; },
+        hardenedArgs: (a) => [...a, '--hardened-marker'],
+      };
+      for await (const _ of anthropic.spawn(ir, { accessToken: '<fake-oauth-token>' }, ctx)) { /* drain */ }
+      const wrapped = wraps[wraps.length - 1];
+      assert.equal(seenBin, '/bin/sh', 'wrapped spawn goes through sh -c');
+      assert.equal(seenArgs[0], '-c');
+      assert.equal(seenArgs[1], `WRAPPED<${wrapped}>`,
+        'sh -c must run the wrapped FULL command line, not the output of the bare-binary probe');
+      assert.ok(wraps[0] !== wrapped && !wraps[0].includes(' '), 'first wrap is the bare-binary probe');
+      for (const needle of ['--model', 'claude-sonnet-4-6', '--output-format', 'stream-json', '--system-prompt', '--hardened-marker']) {
+        assert.ok(wrapped.includes(needle), `wrapped command must contain ${needle}; got: ${wrapped.slice(0, 200)}`);
+      }
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  it('43o: shellJoin quotes arguments so a real shell reproduces them exactly', () => {
+    const parts = ['plain', 'with space', "it's", 'dq"uote', 'line1\nline2', '$HOME', '`id`', ''];
+    const script = shellJoinS43(['printf', '%s\\n', ...parts]);
+    const r = _spawnSyncS36('/bin/sh', ['-c', script], { encoding: 'utf8' });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, parts.map(p => p + '\n').join(''),
+      'every argument must round-trip through sh -c unchanged (no expansion, no splitting)');
+  });
+
+  // ── 43p-43r: behaviour against the REAL sandbox-runtime (child process) ──
+  //
+  // The library keeps process-wide state (signal handlers, proxy listeners), so
+  // these tests run in a child process. They skip where Layer 3 is unavailable.
+  // Found by the independent review (Iron Rule 10) of the Layer 3 fix.
+
+  const MGR_URL_S43 = new URL('./lib/sandbox/manager.mjs', import.meta.url).href;
+  const ANT_URL_S43 = new URL('./lib/providers/anthropic.mjs', import.meta.url).href;
+
+  function _childProviderSrcS43() {
+    return `{ name: 'child', ISOLATION: {
+      ephemeralEnvOverrides: ({ ephemeralRoot }) => ({ HOME: ephemeralRoot }),
+      credentialMounts: [], requiredHomePaths: [], hasInnerSandbox: false,
+      allowedDomains: ['example.test'],
+      crossTenantReadProtection: 'none', recommendedDeploymentTier: 'separate-vm' } }`;
+  }
+
+  function _runChildS43(source, { onStdout } = {}) {
+    const dir = _mkdtempSyncS36(pathJoin(_tmpdirS36(), 'olp-child-'));
+    const file = pathJoin(dir, 'child.mjs');
+    _writeFileSyncS36(file, source);
+    const proc = _spawnS43(process.execPath, [file], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', (d) => { stdout += d; onStdout?.(stdout, proc); });
+    proc.stderr.on('data', (d) => { stderr += d; });
+    const done = new Promise((resolve) => proc.on('close', (code, signal) => {
+      _rmSyncS36(dir, { recursive: true, force: true });
+      resolve({ code, signal, stdout, stderr });
+    }));
+    return { proc, done };
+  }
+
+  for (const [sig, expectedCode] of [['SIGTERM', 143], ['SIGINT', 130]]) {
+    it(`43p: after the first wrapped spawn ${sig} still ends the server (exit ${expectedCode})`, async () => {
+      // sandbox-runtime registers process.once('SIGINT'|'SIGTERM') cleanup handlers in
+      // initialize() that do not exit; with a listener present Node drops its default
+      // exit, so launchctl stop / Ctrl-C would be swallowed.
+      const src = `
+        import { bootstrapSandbox, prepareIsolatedEnvironment } from ${JSON.stringify(MGR_URL_S43)};
+        const b = await bootstrapSandbox();
+        if (!b.active) { console.log('SKIP'); process.exit(0); }
+        const env = await prepareIsolatedEnvironment({ provider: ${_childProviderSrcS43()}, keyId: 'k43p', reqId: 'r43p' });
+        await env.wrapForLayer3('true');
+        console.log('READY');
+        setInterval(() => {}, 1000);
+      `;
+      let sent = false;
+      const { proc, done } = _runChildS43(src, {
+        onStdout: (out, p) => { if (!sent && out.includes('READY')) { sent = true; p.kill(sig); } },
+      });
+      const timer = setTimeout(() => proc.kill('SIGKILL'), 10000);
+      const r = await done;
+      clearTimeout(timer);
+      if (r.stdout.includes('SKIP')) return;   // Layer 3 unavailable on this host
+      assert.ok(sent, `child never became ready: ${r.stdout} ${r.stderr}`);
+      assert.equal(r.signal, null, `child must exit by itself, not be killed (stderr: ${r.stderr.slice(0, 200)})`);
+      assert.equal(r.code, expectedCode, `exit code after ${sig}`);
+    });
+  }
+
+  it('43q: the system prompt survives the real sandbox wrapper unchanged (!, quotes, $, backticks, newline)', async () => {
+    // shell-quote (inside sandbox-runtime) re-quotes the wrapped command; with a
+    // single quote in it, it switches to double quotes and writes "!" as "\\!".
+    // The prompt therefore travels in an env var and only "$OLP_SYSTEM_PROMPT"
+    // appears in the command line.
+    const src = `
+      import { writeFileSync, chmodSync, mkdtempSync } from 'node:fs';
+      import { spawnSync } from 'node:child_process';
+      import { tmpdir } from 'node:os';
+      import { join } from 'node:path';
+      import { bootstrapSandbox, prepareIsolatedEnvironment } from ${JSON.stringify(MGR_URL_S43)};
+      import { layer3CommandLine } from ${JSON.stringify(ANT_URL_S43)};
+      const b = await bootstrapSandbox();
+      if (!b.active) { console.log('SKIP'); process.exit(0); }
+      const dir = mkdtempSync(join(tmpdir(), 'olp-fakecli-'));
+      const bin = join(dir, 'fakeclaude');
+      writeFileSync(bin, '#!/bin/sh\\nfor a in "$@"; do printf "%s\\\\0" "$a"; done\\n');
+      chmodSync(bin, 0o755);
+      const prompt = 'Hallo Welt! Wie geht\\'s? "zitiert" $HOME \`id\` !! \\\\n\\nZeile2';
+      const args = ['--model', 'm', '--system-prompt', prompt, '--verbose'];
+      const ctx = await prepareIsolatedEnvironment({ provider: ${_childProviderSrcS43()}, keyId: 'k43q', reqId: 'r43q' });
+      const { line, env } = layer3CommandLine(bin, args);
+      const wrapped = await ctx.wrapForLayer3(line);
+      const r = spawnSync('/bin/sh', ['-c', wrapped], {
+        env: { ...process.env, ...ctx.envOverrides, ...env }, cwd: ctx.ephemeralRoot, encoding: 'utf8',
+      });
+      console.log('RESULT ' + JSON.stringify({ status: r.status, out: r.stdout, err: r.stderr, args }));
+      await ctx.cleanup();
+      process.exit(0);
+    `;
+    const { done } = _runChildS43(src);
+    const r = await done;
+    if (r.stdout.includes('SKIP')) return;
+    const line = r.stdout.split('\n').find((l) => l.startsWith('RESULT '));
+    assert.ok(line, `child produced no result: ${r.stdout} ${r.stderr}`.slice(0, 400));
+    const res = JSON.parse(line.slice(7));
+    assert.equal(res.status, 0, `sandboxed command failed: ${res.err}`.slice(0, 300));
+    assert.deepEqual(res.out.split('\0').slice(0, -1), res.args,
+      'every argument, including the system prompt, must arrive byte-for-byte');
+  });
+
+  it('43r: parallel first wraps initialize once; a failed initialize is retried on the next spawn', async () => {
+    await _resetSandboxMgr();
+    globalThis.__OLP_FORCE_ISOLATION_IN_TEST = true;
+    let inits = 0, failFirst = true;
+    _setSandboxMgr({
+      initialize: async () => { inits++; await new Promise((r) => setTimeout(r, 10)); if (failFirst) { failFirst = false; throw new Error('boom'); } },
+      updateConfig: () => {},
+      wrapWithSandbox: async (cmd) => cmd,
+    });
+    try {
+      const mk = (n) => prepareIsolatedEnvironment({
+        provider: _isolatedMock({ allowedDomains: ['a.example.test'] }), keyId: 'k43r', reqId: `r${n}` });
+      const [e1, e2, e3] = await Promise.all([mk(1), mk(2), mk(3)]);
+      const settled = await Promise.allSettled([e1.wrapForLayer3('x'), e2.wrapForLayer3('x'), e3.wrapForLayer3('x')]);
+      assert.equal(inits, 1, 'parallel first wraps must share one initialize()');
+      assert.ok(settled.every((s) => s.status === 'rejected'), 'all waiters fail when initialize() fails');
+      const again = await e1.wrapForLayer3('x');
+      assert.equal(again, 'x', 'the next spawn must retry initialize() and succeed');
+      assert.equal(inits, 2, 'exactly one retry after the failure');
+      await e1.cleanup(); await e2.cleanup(); await e3.cleanup();
+    } finally {
+      delete globalThis.__OLP_FORCE_ISOLATION_IN_TEST;
+      await _resetSandboxMgr();
+    }
+  });
+
+  // ── 43l: the spawned CLI runs in the ephemeral home, not in the server cwd ──
+  //
+  // Layer 3 denies reads under the operator's $HOME. The CLI stats its working
+  // directory at startup; inheriting the server cwd (a checkout under $HOME)
+  // made `claude` exit with "An unknown error occurred (Unexpected)" even with a
+  // correct network allowlist (reproduced with `srt`, 2026-11-04: `claude --version`
+  // fails with cwd under a denied $HOME, passes with cwd = ephemeral home).
+  // Authority: ADR 0014 Amendment 1 § A1.2 (Layer 1 per-spawn ephemeral home).
+
+  it('43l: anthropic spawn runs with cwd = isolationCtx.ephemeralRoot', async () => {
+    const inner = makeMockSpawnNDJSON(['ok']);
+    let seenOpts = null;
+    __setSpawnImpl((bin, args, opts) => { seenOpts = opts; return inner(bin, args, opts); });
+    try {
+      const ir = makeIR({
+        model: 'claude-sonnet-4-6',
+        stream: true,
+        messages: [{ role: 'user', content: 'Hi' }],
+      });
+      const chunks = [];
+      for await (const c of anthropic.spawn(ir, { accessToken: '<fake-oauth-token>' },
+        { ephemeralRoot: '/tmp/olp-spawn/k/r/home' })) chunks.push(c);
+      assert.ok(chunks.length > 0, 'spawn must yield chunks');
+      assert.equal(seenOpts.cwd, '/tmp/olp-spawn/k/r/home',
+        'spawn options must set cwd to the ephemeral home');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
 });
 
 // ── Suite 44 — Phase 7 PR-B' (Amendment 1): sandbox Layer 3 E2E test (PI231 only) ──
@@ -18547,7 +18877,8 @@ import { mkdtempSync as mkdtempS45, mkdirSync as mkdirS45, writeFileSync as writ
 import { tmpdir as tmpdirS45 } from 'node:os';
 import { join as joinS45 } from 'node:path';
 import { extractAccounts, resolveAccountDir } from './lib/accounts.mjs';
-import { ISOLATION as anthropicIsolationS45 } from './lib/providers/anthropic.mjs';
+import { ISOLATION as anthropicIsolationS45, shellJoin as shellJoinS43 } from './lib/providers/anthropic.mjs';
+import { spawn as _spawnS43 } from 'node:child_process';
 import { ISOLATION as codexIsolationS45 } from './lib/providers/codex.mjs';
 
 describe('Suite 45 — multi-account per provider (foundation)', () => {

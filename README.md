@@ -626,6 +626,8 @@ The provider plugins' `crossTenantReadProtection` field declares **how** each pr
 
 **OLP_SANDBOX_DISABLED=1** env var disables Layer 3 (per-call sandbox-runtime wrapping) while preserving Layers 1+2+4. This is the post-Amendment 1 escape hatch retained for 1-2 releases; production deployments should leave it unset.
 
+**Layer 3 network policy.** A wrapped spawn can reach only the hosts declared in `ISOLATION.allowedDomains` of the wrapped providers (anthropic: `api.anthropic.com`; the proxies enforce the union of all wrapped providers' lists); every other outbound connection is denied by sandbox-runtime's local proxies, which start with the first wrapped spawn and run until OLP exits ([ADR 0014 Amendment 2](./docs/adr/0014-sandbox-runtime-integration.md), [ADR 0002 Amendment 11](./docs/adr/0002-plugin-architecture.md)). A wrapped provider without `allowedDomains` fails with `SPAWN_FAILED` naming the field. Spawns wrapped by Layer 3 run in the ephemeral home as cwd and still skip the client tool bridge (`tools[]` dropped).
+
 **Attribution vs isolation.** ADR 0007 multi-key auth provides **attribution** (per-key audit, per-key cache namespace, per-key provider gating). ADR 0014 Amendment 1 provides **isolation** (the security tier above). Both layer cleanly — attribution always operates; isolation tier is operator-selected per deployment.
 
 ---

@@ -660,3 +660,41 @@ ADR 0002 Amendment N (Provider ISOLATION contract specification) is a co-merged 
 - **Reviewer:** independent fresh-context reviewer per Iron Rule 10 — pending.
 - **Implementation gate:** ADR 0002 Amendment N (Provider ISOLATION contract specification) must land before or together with PR-C' (the first ISOLATION-block-bearing provider plugin commit).
 - **Production gate:** PI231 E2E (Task #9) must pass the load-bearing negative test before the `OLP_SANDBOX_DISABLED=1` env-var gate is removed from prod startup.
+
+---
+
+# Amendment 2 — Layer 3 correction: process-wide network allowlist, full command line, spawn cwd (2026-11-04)
+
+## A2.1 — Finding
+
+After the Layer 3 library became loadable (server start 2026-11-02 19:18 UTC), every anthropic spawn failed with `An unknown error occurred (Unexpected)` (56 of 56 requests, 0 successes; last success 18:47 UTC, unsandboxed). Four independent defects in Amendment 1's Layer 3 implementation, each reproduced separately:
+
+1. **Network allowlist was empty.** `customConfig.network.allowedDomains: []` means no network access in sandbox-runtime (v0.0.52 README § Network Isolation). `curl https://api.anthropic.com` under `srt` returns no connection with `[]` and reaches the API with `['api.anthropic.com']`.
+2. **Per-call network config is not enforced.** A1.2.3 assumed `wrapWithSandbox(cmd, shell, customConfig)` carries the network policy. In `dist/sandbox/sandbox-manager.js` the HTTP/SOCKS proxies start only in `initialize()` and filter against the process-wide `config.network.allowedDomains`. Without `initialize()` the wrapped command has network restricted and no proxy to route through; the spawn hangs (observed > 90 s).
+3. **The wrapped command lost its arguments.** `anthropic.spawn()` ran `sh -c <wrapForLayer3(bin)>`, wrapping the bare binary path. `--model`, `--output-format stream-json`, `--system-prompt` and all hardened args were dropped; the CLI answered in plain text (`NDJSON parse error on line: ok`, empty completion) and without the Layer 4 tool-suppression prompt.
+4. **The spawn inherited the server cwd.** A checkout under `$HOME` is unreadable under Layer 3's `denyRead: [$HOME]`; `claude --version` itself exits with `Unexpected` (bisected with `srt`: `denyRead: [$HOME]` alone breaks it, `cwd = ephemeral home` fixes it; macOS sandbox log: `deny(1) file-read-data <cwd>`).
+
+## A2.2 — Decision
+
+- **Network:** `SandboxManager.initialize()` is called lazily once, on the first Layer 3 wrap, with the union of `ISOLATION.allowedDomains` of the wrapped providers (ADR 0002 Amendment 11); later providers that add hosts widen the list with `updateConfig()`. This partly reverses A1.2.3's "no singleton init": the *network* policy is process-wide by library design, the *filesystem* policy stays per call (`customConfig.filesystem`).
+- **Full command line:** the wrapper receives `layer3CommandLine(bin, args)`: every argument POSIX single-quoted (`shellJoin`), except the value of `--system-prompt`, which travels in the env var `OLP_SYSTEM_PROMPT` and appears as `"$OLP_SYSTEM_PROMPT"` in the line. Reason: sandbox-runtime re-quotes the command with shell-quote; with a single quote in the string it switches to double quotes and writes `!` as `\!`, which `sh` keeps, so a client system prompt would be altered silently (independent review, reproduced against the real library). The wrap of the bare `bin` remains only as the "is Layer 3 active" probe that decides the tool bridge.
+- **cwd:** anthropic spawns run with `cwd = isolationCtx.ephemeralRoot` (Layer 1).
+- **Signals:** `initialize()` registers `process.once('SIGINT'|'SIGTERM'|'exit')` handlers that `reset()` the proxies but do not exit; with a listener present Node drops its default exit, so `launchctl stop` and Ctrl-C would be swallowed and the server would keep running with its proxies torn down (observed 2026-11-04). After the first successful `initialize()` the manager adds `process.once` handlers that exit with 130 (SIGINT) / 143 (SIGTERM) one tick later.
+
+## A2.3 — Consequences
+
+- Layer 3 works again for anthropic with only `api.anthropic.com` reachable; other outbound hosts are denied by the proxy. The allowlist the proxies enforce is the **union** over all wrapped providers (`config.network.allowedDomains`, `dist/sandbox/sandbox-manager.js` lines 90 and 389); `customConfig.network.allowedDomains` passed per call has no filtering effect and only switches the restriction on. With one wrapped provider this is exact; once a second provider is wrapped, each sees the other's hosts.
+- The listening proxies are local to the OLP process and live until it exits.
+- **Known limit, not verified end to end:** the allowlist does not contain the OAuth refresh host of the claude CLI (`platform.claude.com`, string found in the 2.1.304 binary). Token accounts (`token_keychain`/`token_file`, long-lived `claude setup-token` token via `CLAUDE_CODE_OAUTH_TOKEN`) need no refresh and were verified with a real token (OLP dev instance, Layer 3 active, HTTP 200 with content and usage, 2026-11-04). A default-login account whose access token expires (about 8 h) may fail with 401 under Layer 3; the credential mount under `denyRead: [$HOME]` is likewise untested with a real login. Needs an end-to-end run with a real login before such an account is routed through Layer 3.
+- On Linux each wrap increments sandbox-runtime's `activeSandboxCount` and OLP never calls the library's cleanup, so bwrap mount points stay until exit; the "is Layer 3 active" probe doubles that growth. Pre-existing pattern, not changed here.
+- Still not covered: spawns wrapped by Layer 3 skip the client tool bridge and drop `tools[]` (ADR 0009 Amendment 2 § Details 5). Whether the stub can run inside the wrapper is a separate, unverified question.
+- The codex provider has the same `sh -c <wrapped bin>` shape but is never wrapped (`hasInnerSandbox: true`); it is not changed here.
+
+## A2.4 — Authority
+
+`@anthropic-ai/sandbox-runtime` v0.0.52: README § Network Isolation, § Library usage (`initialize` before `wrapWithSandbox`), `dist/sandbox/sandbox-manager.js` (`initialize`, `updateConfig`, `wrapWithSandbox`). Claude CLI 2.1.304 (observed behaviour, `srt` experiments 2026-11-04). OLP logs `~/.olp/logs/proxy.log` 2026-11-02 to 2026-11-04.
+
+## A2.5 — Status
+
+- **Drafted:** 2026-11-04.
+- **Reviewer:** independent fresh-context reviewer per Iron Rule 10 — pending.
