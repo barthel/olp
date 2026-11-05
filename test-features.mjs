@@ -83,6 +83,8 @@ import {
 } from './lib/providers/index.mjs';
 import anthropic, {
   irToAnthropic,
+  irToAnthropicBlocks,
+  irToAnthropicStdin,
   anthropicChunkToIR,
   anthropicStopToIR,
   readAuthArtifact,
@@ -20695,6 +20697,78 @@ describe('Client tool bridge: names, args, prompt (ADR 0009 Amendment 2)', () =>
   it('irToAnthropic keeps the old annotation for tool messages without any id', () => {
     const prompt = irToAnthropic({ messages: [{ role: 'user', content: 'x' }, { role: 'tool', content: 'r', name: 'search' }] });
     assert.ok(prompt.includes('[Tool Result (search)] r'));
+  });
+
+  // ── ADR 0009 Amendment 6: history as one text block per turn ──────────
+  it('irToAnthropicBlocks: one block per turn, system skipped, join equals irToAnthropic', () => {
+    const ir = {
+      messages: [
+        { role: 'system', content: 'SYS' },
+        { role: 'user', content: 'Q1' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'Q2' },
+      ],
+    };
+    const blocks = irToAnthropicBlocks(ir);
+    assert.deepEqual(blocks, ['Q1', '[Assistant] A1', 'Q2']);
+    assert.equal(irToAnthropic(ir), blocks.join('\n\n'));
+  });
+
+  it('irToAnthropicStdin: one stream-json user event on one line, one text block per turn', () => {
+    const line = irToAnthropicStdin({
+      messages: [
+        { role: 'user', content: 'Q1' },
+        { role: 'assistant', content: 'A1' },
+        { role: 'user', content: 'Q2' },
+      ],
+    });
+    assert.ok(line.endsWith('\n'));
+    assert.equal(line.trimEnd().includes('\n'), false, 'exactly one JSON line');
+    const ev = JSON.parse(line);
+    assert.equal(ev.type, 'user');
+    assert.equal(ev.message.role, 'user');
+    assert.deepEqual(ev.message.content, [
+      { type: 'text', text: 'Q1' },
+      { type: 'text', text: '[Assistant] A1' },
+      { type: 'text', text: 'Q2' },
+    ]);
+  });
+
+  it('irToAnthropicStdin: the prefix of a growing history stays byte-identical (cache precondition)', () => {
+    const base = [
+      { role: 'user', content: 'Q1' },
+      { role: 'assistant', content: 'A1' },
+      { role: 'user', content: 'Q2' },
+    ];
+    const a = JSON.parse(irToAnthropicStdin({ messages: base })).message.content;
+    const b = JSON.parse(irToAnthropicStdin({
+      messages: [...base, { role: 'assistant', content: 'A2' }, { role: 'user', content: 'Q3' }],
+    })).message.content;
+    assert.deepEqual(b.slice(0, a.length), a);
+    assert.equal(b.length, a.length + 2);
+  });
+
+  it('irToAnthropicStdin: turns without text (empty assistant content) leave no empty block', () => {
+    const ev = JSON.parse(irToAnthropicStdin({
+      messages: [
+        { role: 'user', content: 'Q' },
+        { role: 'tool', tool_call_id: 'x', content: '' },
+        { role: 'user', content: '   ' },
+      ],
+    }));
+    for (const b of ev.message.content) assert.notEqual(b.text.trim(), '');
+  });
+
+  it('buildCliArgs: --input-format stream-json is passed with and without a bridge', () => {
+    for (const args of [
+      buildCliArgs('claude-sonnet-4-6', 'SYS'),
+      buildCliArgs('claude-sonnet-4-6', 'SYS', { args: ['--tools', '', '--mcp-config', '{}'], systemSuffix: '' }),
+    ]) {
+      const i = args.indexOf('--input-format');
+      assert.ok(i !== -1, '--input-format must be present');
+      assert.equal(args[i + 1], 'stream-json');
+      assert.ok(!args.includes('-p'), 'no -p (ADR 0009 Amendment 1)');
+    }
   });
 });
 

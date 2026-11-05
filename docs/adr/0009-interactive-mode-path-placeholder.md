@@ -447,3 +447,41 @@ The review (Iron Rule 10) pointed out that `allowRead` on `lib/providers` would 
 
 - **Drafted:** 2026-11-04.
 - **Reviewer:** independent fresh-context reviewer per Iron Rule 10. First review: `allowRead` too wide, temp dir leak on a failed wrap, prompt-injection sentence missing, ADR gaps; all four resolved as described above. Second review of the final design: no blocker; findings (stale texts in README and ADR 0014, cleanup gaps, stub copy rights, silent guard failure, Linux `/tmp` note) resolved as described above. Not re-reviewed after these corrections.
+
+## Amendment 6 - 2026-11-05: History as stream-json content blocks (prompt cache prefix stays stable)
+
+### Trigger
+
+Usage measurement (`usage_detail` log event, commit ea8d849) showed that production anthropic requests wrote roughly 105k tokens per request into the prompt cache and read only about 20 % back. The history was sent as ONE text block on stdin, so every new turn changed the block and invalidated the cache from the start.
+
+### Spike (claude 2.1.283, account ultimate-brick.services, test instance)
+
+| Variant | R1 create / read | R2 create / read | R3 create / read |
+|---|---|---|---|
+| Single text on stdin (before) | ~30.7k / 0 | ~30.7k / 0 | ~30.7k / 0 |
+| `--input-format stream-json`, one text block per turn | ~30.7k / 0 | ~190-310 / ~30.5-31.2k | ~190-310 / ~30.5-31.2k |
+
+The same pattern held with and without `-p` and with the MCP tool bridge.
+
+### Decision
+
+1. `irToAnthropicBlocks(ir)` returns one string per turn; `irToAnthropic` stays as `blocks.join('\n\n')`.
+2. `irToAnthropicStdin(ir)` writes ONE stream-json user event whose `content` holds one text block per turn (empty blocks dropped), followed by `\n`.
+3. `buildCliArgs` adds `--input-format stream-json` (no `-p`, as in Amendment 1).
+
+### Consequences
+
+- Expected: far fewer cache writes per request once the history grows; to be confirmed with `usage_detail` in production.
+- Not verified: one measurement per cell; weighting of cache write/read against the subscription limit; structured `tool_use`/`tool_result` blocks (history is still rendered as text such as `[Assistant called tool ...]`); account switch inside a chain (cache is per account); histories above 100k tokens; claude 2.1.304 (local version was 2.1.283).
+- The full test suite was not run for this change; a targeted run (41, irToAnthropic, buildCliArgs, bridge, spawn) passed 123/123.
+- Rollback: `git revert` of the commit that introduced this amendment.
+
+### Authority citations
+
+- claude CLI `--input-format stream-json` (`claude --help`, 2.1.283).
+- Spike results above; `usage_detail` events in `~/.olp/logs/launchd.log`.
+
+### Status
+
+- **Drafted:** 2026-11-05.
+- **Reviewer:** not reviewed (Iron Rule 10 still open).
