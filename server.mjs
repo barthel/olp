@@ -1866,6 +1866,7 @@ async function handleChatCompletions(req, res) {
           firstChunkEmitted = true;
 
           if (irChunk.type === 'stop') {
+            logUsageDetail(streamedChunks, streamProvider, null, ir.model);
             if (includeUsage) writeUsageChunk(res, ir, streamedChunks, requestId, streamProvider);
             res.write(SSE_DONE);
             res.end();
@@ -2126,6 +2127,7 @@ async function handleChatCompletions(req, res) {
   auditCtx.fallback_hops = fallbackHops;
   auditCtx.tried_providers = (Array.isArray(fallbackDetail) ? fallbackDetail.map(t => t?.provider).filter(Boolean) : []).concat([providerUsed]);
   auditCtx.cache_status = cacheStatus;
+  logUsageDetail(chunks, providerUsed, accountUsed, modelUsed);
 
   if (ir.stream) {
     // Streaming response path: burst replay from buffered chunks.
@@ -2167,6 +2169,17 @@ function writeUsageChunk(res, ir, chunks, requestId, provider) {
     logEvent('info', 'usage_estimated', { provider, model: ir.model, ...usage });
   }
   res.write(irUsageToOpenAISSE(usage, requestId, ir.model));
+}
+
+/**
+ * Logs the provider's token counters by kind (input, cache creation, cache
+ * read, output) of the stop chunk. Counters only, no content. Nothing is
+ * logged when the provider attached no `usage_detail`.
+ */
+function logUsageDetail(chunks, provider, account, model) {
+  const stop = chunks.find(c => c?.type === 'stop' && c.usage_detail);
+  if (!stop) return;
+  logEvent('info', 'usage_detail', { provider, account: account ?? null, model, ...stop.usage_detail });
 }
 
 // ── Phase 3 / D50 — Management endpoints (owner_only_block per ADR 0008 §8) ──

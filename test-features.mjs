@@ -98,6 +98,7 @@ import anthropic, {
   buildSpawnEnv as buildAnthropicSpawnEnv,
   parseStreamJsonLines,
   anthropicStreamJsonEventToIR,
+  anthropicUsageDetail,
   // ADR 0009 Amendment 2 — client tool bridge
   TOOL_BRIDGE_PREFIX,
   sanitizeToolNames,
@@ -17807,6 +17808,26 @@ describe('Suite 41 — ADR 0009 Amendment 1: stream-json transport (Phase 6)', (
   it('41e-3c: anthropicStreamJsonEventToIR — result without usage → no usage field', () => {
     const chunk = anthropicStreamJsonEventToIR({ type: 'result', subtype: 'success', is_error: false }, false);
     assert.equal(chunk.usage, undefined);
+    assert.equal(chunk.usage_detail, undefined);
+  });
+
+  it('41e-3d: anthropicStreamJsonEventToIR — result usage → usage_detail with counters by kind', () => {
+    const event = {
+      type: 'result', subtype: 'success', is_error: false, result: 'hello',
+      usage: { input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 5, output_tokens: 7 },
+    };
+    const chunk = anthropicStreamJsonEventToIR(event, false);
+    assert.deepEqual(chunk.usage_detail, {
+      source: 'result', input_tokens: 100, cache_creation_input_tokens: 20, cache_read_input_tokens: 5, output_tokens: 7,
+    });
+  });
+
+  it('41e-3e: anthropicUsageDetail — null for missing usage, zero for missing or invalid counters', () => {
+    assert.equal(anthropicUsageDetail(undefined, 'result'), null);
+    assert.equal(anthropicUsageDetail('x', 'result'), null);
+    assert.deepEqual(anthropicUsageDetail({ input_tokens: 3, output_tokens: -1, cache_read_input_tokens: 'a' }, 'assistant'), {
+      source: 'assistant', input_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 0, output_tokens: 0,
+    });
   });
 
   it('41e-4: anthropicStreamJsonEventToIR — result is_error → throws ProviderError', () => {
