@@ -9,6 +9,7 @@
  *   D5 adds: Suite 9 (cache layer unit + HTTP integration), Suite 10 (Anthropic E2E gated)
  */
 
+import './test-setup.mjs';
 import { describe, it, before, after, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { request as httpRequest } from 'node:http';
@@ -9680,6 +9681,10 @@ describe('D38 — maxConcurrent runtime enforcement (Suite 18)', () => {
         assert.equal(failures.length, 3,
           `expected exactly 3 failed responses (chain-exhausted on CONCURRENCY_LIMIT), got ${failures.length}`);
       } finally {
+        // Release the gate even when an assertion above threw; otherwise the
+        // gated mock spawns keep their HTTP connections open and server18.close
+        // in the suite's after() hook never resolves.
+        releaseGate();
         // Restore original maxConcurrent.
         anthropic.hints.maxConcurrent = savedMaxConcurrent;
         __resetSpawnImpl();
