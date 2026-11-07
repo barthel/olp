@@ -3055,6 +3055,7 @@ describe('D36 #2 — cache_control partial-noop debug log (Suite 9f)', () => {
       for (let n = 0; n < 2; n++) {
         const r = await post({ model: 'gpt-5.5', tools, messages: [{ role: 'user', content: 'hello-tools-bypass' }] });
         assert.equal(r.status, 200, r.body.slice(0, 200));
+        assert.equal(r.headers['x-olp-cache'], 'bypass', 'tools[] request must report X-OLP-Cache: bypass');
       }
     } finally { stopStdoutCapture(); }
     assert.equal(spawns, 2, 'identical tools[] requests must both reach the provider');

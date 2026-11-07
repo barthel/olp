@@ -7,6 +7,13 @@
 
 ## Amendments
 
+### Amendment 10 — 2026-11-07: Requests with `tools[]` report `bypass`, not `miss`
+
+- **Finding:** Amendment 9 skips the cache for requests with `tools[]`, but the status derivation only knew `bypass` for `cache_control` markers on an Anthropic hop. A tools request fell into the `miss` branch. On a live instance with agent clients (Vibe, Claude Code) the 24h statistics showed `miss 609 / bypass 0 / hit 0` although the cache was never consulted; the 0 % hit rate looked like a broken cache.
+- **Decision:** A request whose IR has a non-empty `tools` array reports `cache_status: bypass` in the audit event and `X-OLP-Cache: bypass` on the response, for the buffered path and the real-streaming path. Cache behaviour is unchanged (Amendment 9 still holds). `hit` from a cache entry and `streaming_attached` cannot occur for such a request. Error responses keep their existing status. Dashboard and `lib/audit-query.mjs` count the request under `bypass` through the existing audit field; no schema change.
+- **Consequence:** Audit data written before this amendment still counts tools requests as `miss`. The hit rate of an agent-heavy instance stays near 0 by design; `bypass` now says why.
+- **Authority:** ADR 0005 Amendment 9; ADR 0005 § D2 (`bypass` status); `server.mjs` `requestHasTools`, test "ADR 0005 Amendment 9" in `test-features.mjs`.
+
 ### Amendment 9 — 2026-11-02: Requests with `tools[]` bypass the cache
 
 - **Finding:** With the anthropic tool bridge (ADR 0009 Amendment 2) the answer to a request with `tools[]` can be a set of tool calls with generated ids. Replaying such an answer from the cache hands the client a call it has already executed (or one whose id no longer matches the client's state).

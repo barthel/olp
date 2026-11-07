@@ -4,6 +4,10 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Cache status for requests with `tools[]` (ADR 0005 Amendment 10)
+
+- **fix(cache): requests with `tools[]` report `bypass` instead of `miss`** in `X-OLP-Cache` and the audit `cache_status`, for the buffered and the real-streaming path. Before, an instance serving agent clients showed `miss N / bypass 0` and a 0 % hit rate although the cache was never consulted. Cache behaviour is unchanged (Amendment 9). Audit events written before this change still count such requests as `miss`.
+
 ### Client tool bridge under Layer 3 (ADR 0009 Amendment 5)
 
 - **fix(anthropic): requests with `tools[]` keep `tool_calls` when Layer 3 wraps the spawn.** Before, every Vibe request through the launchd instance lost its tools (and with them file access, shell and skills, which Vibe runs as tool calls). The stub now runs from a copy in the bridge temp dir; the sandbox configuration is unchanged and no extra read access is granted. End to end with Layer 3 active (macOS): tool call, two parallel calls, follow-up turn, plain chat.

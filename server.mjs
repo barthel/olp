@@ -1734,7 +1734,7 @@ async function handleChatCompletions(req, res) {
       } else if (role === 'attached') {
         auditCtx.cache_status = 'streaming_attached';
       } else {
-        auditCtx.cache_status = 'miss';
+        auditCtx.cache_status = requestHasTools ? 'bypass' : 'miss';
       }
 
       // D58 — ADR 0005 Amendment 8 §9: wire HTTP req close → iterator
@@ -1775,7 +1775,7 @@ async function handleChatCompletions(req, res) {
       // emitted via streaming_inflight_source_done log event with
       // attached_count=0; the wire header reports `source` initially and
       // does NOT flip mid-stream. Future ADR may expose it on a trailer.
-      const cacheStatusForHeader = (role === 'cache_hit') ? 'hit' : 'miss';
+      const cacheStatusForHeader = (role === 'cache_hit') ? 'hit' : (requestHasTools ? 'bypass' : 'miss');
       const streamHeaders = olpHeaders({
         providerUsed: streamProvider,
         modelUsed: streamModel,
@@ -2105,7 +2105,7 @@ async function handleChatCompletions(req, res) {
   // preCheckHit covers the primary-hop case (fallbackHops===0); lastHopWasCached
   // covers any hop (including fallback hops that served from their own cache).
   // The two flags combine: if either signals a cache hit AND no bypass, report 'hit'.
-  const cacheStatus = bypassCacheForServingHop ? 'bypass'
+  const cacheStatus = (bypassCacheForServingHop || requestHasTools) ? 'bypass'
     : (lastHopWasCached || (preCheckHit && fallbackHops === 0)) ? 'hit'
     : 'miss';
   // D40 (issue #7): when at least one prior hop failed before this success,
