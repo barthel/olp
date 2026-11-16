@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Startet die lokale OLP-Instanz über launchd neu.
+# Nutzung: bin/olp-restart [--label=LABEL] [--port=PORT]
+# Ohne geladenen Dienst wird die plist aus ~/Library/LaunchAgents per bootstrap geladen.
+set -euo pipefail
+
+LABEL="dev.olp.proxy"
+PORT="${OLP_PORT:-4567}"
+for arg in "$@"; do
+  case "$arg" in
+    --label=*) LABEL="${arg#*=}" ;;
+    --port=*) PORT="${arg#*=}" ;;
+    -h|--help) sed -n '2,4p' "$0"; exit 0 ;;
+    *) echo "Unbekannte Option: $arg" >&2; exit 2 ;;
+  esac
+done
+
+DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/${LABEL}.plist"
+
+if launchctl print "${DOMAIN}/${LABEL}" >/dev/null 2>&1; then
+  # -k beendet die laufende Instanz (SIGTERM, danach SIGKILL) und startet sie neu.
+  launchctl kickstart -k "${DOMAIN}/${LABEL}"
+elif [[ -f "$PLIST" ]]; then
+  launchctl bootstrap "$DOMAIN" "$PLIST"
+else
+  echo "Dienst ${LABEL} nicht geladen und ${PLIST} fehlt." >&2
+  exit 1
+fi
+
+# Auf Health-Endpoint warten (max. 20 s).
+for _ in $(seq 1 40); do
+  if curl -fs -o /dev/null --max-time 1 "http://127.0.0.1:${PORT}/health"; then
+    pid="$(launchctl print "${DOMAIN}/${LABEL}" | awk '/^[[:space:]]*pid =/ {print $3; exit}')"
+    echo "OLP läuft (${LABEL}, PID ${pid:-?}, Port ${PORT})."
+    exit 0
+  fi
+  sleep 0.5
+done
+
+echo "OLP antwortet nach 20 s nicht auf :${PORT}/health. Logs prüfen (plist: StandardErrorPath)." >&2
+exit 1
