@@ -18771,18 +18771,22 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
     const init = (status) => ({ type: 'system', subtype: 'init', mcp_servers: [{ name: TOOL_BRIDGE_SERVER, status }] });
     assert.match(anthropicBridgeFailure(init('failed')), /failed to start/);
     assert.equal(anthropicBridgeFailure(init('connected')), null);
+    assert.equal(anthropicBridgeFailure(init('pending')), null, 'only a failed bridge is an error');
     assert.equal(anthropicBridgeFailure({ type: 'system', subtype: 'init', mcp_servers: [] }), null);
     assert.equal(anthropicBridgeFailure({ type: 'system', subtype: 'api_retry' }), null);
     assert.equal(anthropicBridgeFailure({ type: 'assistant' }), null);
   });
 
   it('43v-5: spawn with tools[] fails with SPAWN_FAILED instead of answering without tools when the bridge is failed', async () => {
+    const bridgeDirs = () => readdirSyncS43(_tmpdirForSetup()).filter(n => n.startsWith('olp-tools-')).length;
+    const dirsBefore = bridgeDirs();
+    let killed = 0;
     __setSpawnImpl(() => {
       const proc = new EventEmitter();
       proc.stdout = new EventEmitter();
       proc.stderr = new EventEmitter();
       proc.killed = false;
-      proc.kill = () => {};
+      proc.kill = () => { killed++; };
       proc.stdin = {
         write: () => {},
         end: () => setImmediate(() => {
@@ -18798,6 +18802,32 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
       await assert.rejects(async () => {
         for await (const _ of anthropic.spawn(makeIR({ model: 'claude-sonnet-4-6', stream: true, tools, messages: [{ role: 'user', content: 'hi' }] }), { accessToken: '<fake>' })) { /* drain */ }
       }, (e) => e.name === 'ProviderError' && e.code === 'SPAWN_FAILED' && /tool bridge/.test(e.message));
+      assert.ok(killed >= 1, 'the CLI must be killed when the bridge failed');
+      assert.equal(bridgeDirs(), dirsBefore, 'the bridge temp dir must be removed');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  it('43v-6: a request without tools[] is not failed by a failed bridge entry in system/init', async () => {
+    __setSpawnImpl(() => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.killed = false;
+      proc.kill = () => {};
+      proc.stdin = {
+        write: () => {},
+        end: () => setImmediate(() => {
+          proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', tools: [], mcp_servers: [{ name: TOOL_BRIDGE_SERVER, status: 'failed' }] }) + '\n'));
+          proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: 'ok' }) + '\n'));
+          proc.emit('close', 0, null);
+        }),
+      };
+      return proc;
+    });
+    try {
+      for await (const _ of anthropic.spawn(makeIR({ model: 'claude-sonnet-4-6', stream: true, messages: [{ role: 'user', content: 'hi' }] }), { accessToken: '<fake>' })) { /* drain */ }
     } finally {
       __resetSpawnImpl();
     }

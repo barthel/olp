@@ -490,7 +490,7 @@ The same pattern held with and without `-p` and with the MCP tool bridge.
 
 ### Trigger
 
-Vibe sessions through OLP showed tool calls as plain text (`<invoke name="search_tool_functions">...`) and nothing was executed (2026-11-13 and 2026-11-16). A temporary trace of the raw `claude` stdout showed the cause: the `system/init` event reported `mcp_servers: [{name: "olp", status: "failed"}]` and `tools: []`, while all 27 working runs reported `connected` with 12 tools. The bridge stub is started with `process.execPath`; the running OLP process still pointed at a versioned Homebrew Cellar path (`/opt/homebrew/Cellar/node/26.13.1/bin/node`) that `brew upgrade` had removed (`26.13.1_2` now installed). The stub could not start, claude ran without any tool, and OLP answered 200 with the model's text.
+Vibe sessions through OLP showed tool calls as plain text (`<invoke name="search_tool_functions">...`) and nothing was executed (2026-11-13 and 2026-11-16). A temporary trace of the raw `claude` stdout showed the cause: the `system/init` event reported `mcp_servers: [{name: "olp", status: "failed"}]` and `tools: []`, while the 1072 working events in the trace reported `connected` (12 tools in the bridge requests). The 2026-11-13 failures happened before the trace was running; the same cause is plausible there (the node of that process had also been upgraded) but not proven. The bridge stub is started with `process.execPath`; the running OLP process still pointed at a versioned Homebrew Cellar path (`/opt/homebrew/Cellar/node/26.13.1/bin/node`) that `brew upgrade` had removed (`26.13.1_2` now installed). The stub could not start, claude ran without any tool, and OLP answered 200 with the model's text.
 
 ### Authority
 
@@ -505,10 +505,10 @@ claude CLI 2.1.311, stream-json `system/init` event, field `mcp_servers[].status
 
 - A `brew upgrade` no longer breaks tools of a running OLP instance.
 - If the bridge fails for another reason, the client gets an error (and fallback applies) instead of a 200 whose text imitates a tool call.
-- Not verified: a bridge status other than `failed` (for example `pending`) is not treated as failure.
+- Not verified: a bridge status other than `failed` (for example `pending`) is not treated as failure (covered by test 43v-4). A request whose `init` lacks the bridge server entirely still runs without tools; the trace shows no such case.
 - The launchd plist should reference `/opt/homebrew/bin/node` rather than a Cellar path (operator-side, not part of the repo).
 
 ### Status
 
 - **Drafted:** 2026-11-17.
-- **Reviewer:** not reviewed (Iron Rule 10 still open).
+- **Reviewer:** independent fresh-context reviewer per Iron Rule 10 (2026-11-17), APPROVE with conditions: authority checked against the raw trace (`/tmp/olp-trace.ndjson`, 2x failed / 1072x connected, claude 2.1.311); conditions (review status, corrected counts, three additional tests) addressed in the follow-up commit.
