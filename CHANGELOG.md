@@ -4,6 +4,11 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Tool bridge after a node upgrade (ADR 0009 Amendment 7)
+
+- **fix(anthropic): the tool-bridge stub starts with an existing node binary.** `process.execPath` of a long-running OLP can point at a Cellar version that `brew upgrade` removed; the stub then failed silently and Vibe showed tool calls as text. The bridge now falls back to `/opt/homebrew/bin/node` (and other stable paths).
+- **fix(anthropic): a failed bridge (`mcp_servers` status `failed` in `system/init`) ends the request with `SPAWN_FAILED`** instead of a 200 without tools.
+
 ### Cache status for requests with `tools[]` (ADR 0005 Amendment 10)
 
 - **fix(cache): requests with `tools[]` report `bypass` instead of `miss`** in `X-OLP-Cache` and the audit `cache_status`, for the buffered and the real-streaming path. Before, an instance serving agent clients showed `miss N / bypass 0` and a 0 % hit rate although the cache was never consulted. Cache behaviour is unchanged (Amendment 9). Audit events written before this change still count such requests as `miss`.

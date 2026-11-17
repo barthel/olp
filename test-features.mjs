@@ -106,6 +106,8 @@ import anthropic, {
   TOOL_BRIDGE_PREFIX,
   sanitizeToolNames,
   buildToolBridge,
+  resolveBridgeNode,
+  anthropicBridgeFailure,
   TOOL_BRIDGE_SERVER,
   anthropicToolUsesFromEvent,
   toolUsesToIRToolCalls,
@@ -18744,6 +18746,58 @@ describe('Suite 43 — Phase 7 PR-B: lib/sandbox/manager.mjs', () => {
       assert.ok(/olp-tools-[^/]*\/anthropic-tool-stub\.mjs/.test(real.cmd), 'the stub runs from the bridge temp dir');
       assert.ok(!real.cmd.includes('lib/providers/anthropic-tool-stub.mjs'), 'the checkout path (under the operator home) must not be used');
       assert.ok(seenArgs[1].startsWith('WRAPPED<'), 'spawn goes through the wrapper');
+    } finally {
+      __resetSpawnImpl();
+    }
+  });
+
+  // ── 43v: tool bridge survives a vanished node binary / reports a failed bridge (ADR 0009 Amendment 7) ──
+
+  it('43v-1: resolveBridgeNode keeps process.execPath while it exists', () => {
+    assert.equal(resolveBridgeNode('/a/node', ['/b/node'], (p) => p === '/a/node'), '/a/node');
+  });
+
+  it('43v-2: resolveBridgeNode falls back to a stable path when the versioned binary is gone (brew upgrade)', () => {
+    const gone = '/opt/homebrew/Cellar/node/26.13.1/bin/node';
+    assert.equal(resolveBridgeNode(gone, ['/x/node', '/opt/homebrew/bin/node'], (p) => p === '/opt/homebrew/bin/node'), '/opt/homebrew/bin/node');
+  });
+
+  it('43v-3: resolveBridgeNode throws SPAWN_FAILED when nothing exists', () => {
+    assert.throws(() => resolveBridgeNode('/gone/node', ['/also/gone'], () => false),
+      (e) => e.name === 'ProviderError' && e.code === 'SPAWN_FAILED' && /restart OLP/.test(e.message));
+  });
+
+  it('43v-4: anthropicBridgeFailure flags only a failed bridge server in system/init', () => {
+    const init = (status) => ({ type: 'system', subtype: 'init', mcp_servers: [{ name: TOOL_BRIDGE_SERVER, status }] });
+    assert.match(anthropicBridgeFailure(init('failed')), /failed to start/);
+    assert.equal(anthropicBridgeFailure(init('connected')), null);
+    assert.equal(anthropicBridgeFailure({ type: 'system', subtype: 'init', mcp_servers: [] }), null);
+    assert.equal(anthropicBridgeFailure({ type: 'system', subtype: 'api_retry' }), null);
+    assert.equal(anthropicBridgeFailure({ type: 'assistant' }), null);
+  });
+
+  it('43v-5: spawn with tools[] fails with SPAWN_FAILED instead of answering without tools when the bridge is failed', async () => {
+    __setSpawnImpl(() => {
+      const proc = new EventEmitter();
+      proc.stdout = new EventEmitter();
+      proc.stderr = new EventEmitter();
+      proc.killed = false;
+      proc.kill = () => {};
+      proc.stdin = {
+        write: () => {},
+        end: () => setImmediate(() => {
+          proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'system', subtype: 'init', tools: [], mcp_servers: [{ name: TOOL_BRIDGE_SERVER, status: 'failed' }] }) + '\n'));
+          proc.stdout.emit('data', Buffer.from(JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: '<invoke name="x"></invoke>' }) + '\n'));
+          proc.emit('close', 0, null);
+        }),
+      };
+      return proc;
+    });
+    try {
+      const tools = [{ type: 'function', function: { name: 'bash', description: 'x', parameters: { type: 'object', properties: {} } } }];
+      await assert.rejects(async () => {
+        for await (const _ of anthropic.spawn(makeIR({ model: 'claude-sonnet-4-6', stream: true, tools, messages: [{ role: 'user', content: 'hi' }] }), { accessToken: '<fake>' })) { /* drain */ }
+      }, (e) => e.name === 'ProviderError' && e.code === 'SPAWN_FAILED' && /tool bridge/.test(e.message));
     } finally {
       __resetSpawnImpl();
     }

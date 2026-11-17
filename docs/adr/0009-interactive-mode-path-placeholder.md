@@ -485,3 +485,30 @@ The same pattern held with and without `-p` and with the MCP tool bridge.
 
 - **Drafted:** 2026-11-05.
 - **Reviewer:** not reviewed (Iron Rule 10 still open).
+
+## Amendment 7 - 2026-11-17: Tool bridge survives a vanished node binary and reports a failed bridge
+
+### Trigger
+
+Vibe sessions through OLP showed tool calls as plain text (`<invoke name="search_tool_functions">...`) and nothing was executed (2026-11-13 and 2026-11-16). A temporary trace of the raw `claude` stdout showed the cause: the `system/init` event reported `mcp_servers: [{name: "olp", status: "failed"}]` and `tools: []`, while all 27 working runs reported `connected` with 12 tools. The bridge stub is started with `process.execPath`; the running OLP process still pointed at a versioned Homebrew Cellar path (`/opt/homebrew/Cellar/node/26.13.1/bin/node`) that `brew upgrade` had removed (`26.13.1_2` now installed). The stub could not start, claude ran without any tool, and OLP answered 200 with the model's text.
+
+### Authority
+
+claude CLI 2.1.311, stream-json `system/init` event, field `mcp_servers[].status` (observed in the transcript trace of 2026-11-16; `connected` in working runs, `failed` in failing runs).
+
+### Decision
+
+1. `resolveBridgeNode()` keeps `process.execPath` while the file exists; otherwise it falls back to `/opt/homebrew/bin/node`, `/usr/local/bin/node`, `/usr/bin/node`; if none exists it throws `ProviderError` `SPAWN_FAILED` ("restart OLP"). `buildToolBridge` uses it for the stub command.
+2. `anthropicBridgeFailure(event)` recognises a `system/init` event whose bridge server (`olp`) has status `failed`. The spawn loop then kills the CLI and throws `SPAWN_FAILED` instead of returning a tool-less answer. The fallback engine treats it like any other spawn failure.
+
+### Consequences
+
+- A `brew upgrade` no longer breaks tools of a running OLP instance.
+- If the bridge fails for another reason, the client gets an error (and fallback applies) instead of a 200 whose text imitates a tool call.
+- Not verified: a bridge status other than `failed` (for example `pending`) is not treated as failure.
+- The launchd plist should reference `/opt/homebrew/bin/node` rather than a Cellar path (operator-side, not part of the repo).
+
+### Status
+
+- **Drafted:** 2026-11-17.
+- **Reviewer:** not reviewed (Iron Rule 10 still open).
