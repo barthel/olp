@@ -517,25 +517,36 @@ claude CLI 2.1.311, stream-json `system/init` event, field `mcp_servers[].status
 
 ### Trigger
 
-Vibe sessions through OLP could not see images. `read_file` on a JPEG returned the image as an OpenAI content part (`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}`) in a `role: tool` message. `irToAnthropicBlocks` rendered every array content with `JSON.stringify(msg.content)`, so the base64 payload went to the model as text inside a `[Tool Result ...]` block and no image block was sent. Reproduced locally with `irToAnthropicStdin` (the stdin event contained the `image_url` JSON as text).
+Vibe sessions through OLP could not see images: `read_file` on a JPEG returned only metadata and an `[Image]` marker. The first assumption was that OLP flattened an `image_url` part of the `role: tool` message to text. That assumption is wrong for Vibe (see below), but the OLP defect behind it is real.
+
+OLP defect: `irToAnthropicBlocks` rendered every array content with `JSON.stringify(msg.content)`. An OpenAI `image_url` part (`{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`) in any message therefore reached the model as base64 text and no image block was sent. Reproduced with `irToAnthropicStdin` (the stdin event contained the `image_url` JSON as text).
+
+Capture of the real Vibe 3.1.2 request (2026-11-18, capture proxy between Vibe and OLP, `read_file` on a PNG): the `role: tool` message carries only the string `{"path":...,"content":"Image file (image/png, 97 bytes).",...}\n\n[Image]`, no image part, with and without `supports_images = true` on the olp models. The cause sits in Vibe: `mistralai_vibe_local_harness/vibe/adapters/generic/_openai_chat.py`, `_tool_result_text`, replaces every image of a tool result with `[Image]` because the Chat Completions format takes images on user messages only. The same file sends images of a `user` message as `image_url` data URIs (`_user_with_images_to_parts`). So the `read_file` symptom is produced by Vibe before OLP sees the request; this amendment does not change it.
 
 ### Authority
 
-- Anthropic Messages API content blocks: `image` with `source.type` `base64` (fields `media_type`, `data`) or `url`.
-- OpenAI chat completions content parts: `image_url` with `url` (data URL or http(s) URL), as sent by the entry surface (`lib/ir/openai-to-ir.mjs` passes array content through unchanged).
-- claude CLI `--input-format stream-json` (user event with `message.content` as block array, ADR 0009 Amendment 6).
+- Anthropic Messages API, vision: https://docs.anthropic.com/en/docs/build-with-claude/vision (`image` content block, `source.type` `base64` with `media_type` and `data`, or `url`; media types jpeg, png, gif, webp).
+- OpenAI Chat Completions, content parts: https://platform.openai.com/docs/api-reference/chat/create (`image_url` part with `url`, data URL or http(s) URL). The entry surface passes array content through unchanged (`lib/ir/openai-to-ir.mjs`, `translateMessage`).
+- RFC 2397 (data URL scheme): parameters may precede `;base64`.
+- claude CLI 2.1.311, `--input-format stream-json` (user event with `message.content` as block array, ADR 0009 Amendment 6).
+- Vibe 3.1.2, `mistralai_vibe_local_harness/vibe/adapters/generic/_openai_chat.py`, `_tool_result_text` and `_user_with_images_to_parts` (read 2026-11-18).
 
 ### Decision
 
 1. `irToAnthropicTurns(ir)` returns one `{ text, images }` entry per turn. `splitContent` turns `image_url` parts into `image` blocks: data URL to a `base64` source, http(s) URL to a `url` source. An unsupported URL (for example `file:`) becomes the text note `[image omitted: unsupported image URL]`.
 2. `irToAnthropicStdin` writes the text block of a turn, then the image blocks of that turn. This also holds for `role: tool` results; the `[Tool Result (...)]` text stays and the image follows it.
 3. Array content without any `image_url` part keeps the JSON text rendering. `irToAnthropicBlocks` and `irToAnthropic` stay text-only (images are not part of the text rendering).
+4. Accepted data URLs: media type jpeg, png, gif or webp (case-insensitive scheme and type, lower-cased on output), optional `;name=value` parameters before `;base64` (RFC 2397), whitespace inside the payload removed. Empty payloads, other media types (for example `image/svg+xml`, which the API does not take) and a missing `url` become the text note.
+5. Within one turn the text parts are joined with a newline into one text block and the image blocks follow it; the interleaving of text and images inside a turn is not kept.
+6. Images in `assistant` turns are dropped without a note (`images: []` in `irToAnthropicTurns`); only their text stays. Only `user` and `tool` turns carry images to the CLI. An invalid image URL in any turn leaves the text note.
 
 ### Consequences
 
-- Images from user turns and tool results are no longer flattened to base64 text.
-- Not verified: acceptance of `image` blocks by the claude CLI over stdin. The probe in this session failed before any API call (`OAuth session expired and could not be refreshed`, zero tokens). Only the generated stdin event is covered by tests.
-- Not verified: whether the CLI and API accept the `url` source for all hosts, and how large images behave (no size limit or downscaling is applied by OLP).
+- Images in `image_url` parts (user turns and tool results) are no longer flattened to base64 text.
+- Verified (2026-11-18, claude 2.1.311 through the launchd instance, claude-haiku-4-5, 64x64 solid-colour PNGs): a user turn with an orange image answered "Orange"; a tool result with pink, violet and turquoise images answered "Rosa", "Magenta" and "Türkis" (violet to "Magenta" is a near miss, not an exact match). The control with the Vibe string `[Image]` instead of an image answered "Blau" every time. Scope: four probes, one model, one CLI version, PNG only. It shows that the CLI takes `image` blocks over `--input-format stream-json` and that the model sees the pixels; it is not a broad compatibility test.
+- Does not fix the original Vibe symptom: Vibe 3.1.2 never sends an image part for a `read_file` result (see Trigger). Images only reach OLP when the client sends `image_url` in a `user` message. Fixing `read_file` on images is a Vibe matter.
+- Side finding: the claude CLI resolves `@/path` mentions in the prompt text itself. A request whose text contains `@/tmp/x.png` or `@/tmp/secret.txt` returned the file content (colour of the image, file text) although no image or tool was sent. The CLI therefore reads local files named in client text, outside the tool bridge. Not addressed here; it needs its own decision.
+- Not verified: the `url` source for http(s) images. It is passed on as `source.type: url`; whether the CLI or the API fetches the URL, and whether either accepts it for all hosts, was not checked (SSRF exposure is therefore open). Also not verified: large images (no size limit or downscaling by OLP beyond the 5 MB request body limit in `server.mjs`).
 - Not covered: the mistral and codex plugins still render array content with `JSON.stringify`; images stay text there. `estimateCost` still counts the serialized content, so images inflate the character estimate.
 - Not verified: effect on the cache key of requests with image parts (the IR content is passed through unchanged).
 - Rollback: `git revert` of the commit that introduced this amendment.
@@ -543,4 +554,4 @@ Vibe sessions through OLP could not see images. `read_file` on a JPEG returned t
 ### Status
 
 - **Drafted:** 2026-11-18.
-- **Reviewer:** not reviewed (Iron Rule 10 still open).
+- **Reviewer:** independent fresh-context reviewer per Iron Rule 10 (2026-11-18), APPROVE with conditions: 18/18 `irToAnthropic` tests passed at review time; conditions (duplicate line removed, verification scope and colour wording corrected, decisions 4 to 6 added, authority URLs and versions added, isolation comment in `anthropic.mjs` corrected, eleven additional tests) addressed in the follow-up commit. Open and tracked outside this amendment: the CLI `@/path` expansion (needs its own issue before release) and the unverified `url` source (SSRF exposure).

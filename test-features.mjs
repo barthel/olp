@@ -20910,6 +20910,98 @@ describe('Client tool bridge: names, args, prompt (ADR 0009 Amendment 2)', () =>
     assert.equal(prompt, JSON.stringify([{ type: 'text', text: 'hi' }]));
   });
 
+  const imgPart = (url) => ({ type: 'image_url', image_url: { url } });
+  const stdinContent = (messages, extra = {}) => JSON.parse(irToAnthropicStdin({ messages, ...extra })).message.content;
+
+  it('irToAnthropicStdin: image without text leaves no empty text block', () => {
+    const c = stdinContent([{ role: 'user', content: [imgPart('data:image/png;base64,QUJD')] }]);
+    assert.equal(c.length, 1);
+    assert.equal(c[0].type, 'image');
+  });
+
+  it('irToAnthropicStdin: several images of one turn keep their order', () => {
+    const c = stdinContent([{ role: 'user', content: [
+      imgPart('data:image/png;base64,QUFB'),
+      imgPart('data:image/jpeg;base64,QkJC'),
+    ] }]);
+    assert.deepEqual(c.map((b) => b.source.data), ['QUFB', 'QkJC']);
+    assert.deepEqual(c.map((b) => b.source.media_type), ['image/png', 'image/jpeg']);
+  });
+
+  it('irToAnthropicStdin: text, image, text in one turn becomes one joined text block, then the image', () => {
+    const c = stdinContent([{ role: 'user', content: [
+      { type: 'text', text: 'a' },
+      imgPart('data:image/png;base64,QUJD'),
+      { type: 'text', text: 'b' },
+    ] }]);
+    assert.deepEqual(c.map((b) => b.type), ['text', 'image']);
+    assert.equal(c[0].text, 'a\nb');
+  });
+
+  it('irToAnthropicStdin: an image in an assistant turn is dropped, its text stays (documented loss)', () => {
+    const c = stdinContent([
+      { role: 'user', content: 'Q' },
+      { role: 'assistant', content: [{ type: 'text', text: 'A' }, imgPart('data:image/png;base64,QUJD')] },
+    ]);
+    assert.ok(c.every((b) => b.type === 'text'));
+    assert.ok(c.some((b) => b.text === '[Assistant] A'));
+  });
+
+  it('irToAnthropicStdin: data URL with parameters and upper-case scheme is accepted, media type is lower-cased', () => {
+    const c = stdinContent([{ role: 'user', content: [
+      imgPart('data:image/png;charset=utf-8;base64,QUJD'),
+      imgPart('DATA:IMAGE/PNG;BASE64,REVG'),
+    ] }]);
+    assert.deepEqual(c[0].source, { type: 'base64', media_type: 'image/png', data: 'QUJD' });
+    assert.deepEqual(c[1].source, { type: 'base64', media_type: 'image/png', data: 'REVG' });
+  });
+
+  it('irToAnthropicStdin: line breaks inside the base64 payload are removed', () => {
+    const c = stdinContent([{ role: 'user', content: [imgPart('data:image/png;base64,QU\nJD\n')] }]);
+    assert.equal(c[0].source.data, 'QUJD');
+  });
+
+  it('irToAnthropicStdin: empty payload, svg and a missing url become the text note', () => {
+    for (const part of [
+      imgPart('data:image/png;base64,'),
+      imgPart('data:image/svg+xml;base64,QUJD'),
+      { type: 'image_url' },
+      { type: 'image_url', image_url: null },
+    ]) {
+      const c = stdinContent([{ role: 'user', content: [part] }]);
+      assert.equal(c.length, 1);
+      assert.equal(c[0].type, 'text');
+      assert.ok(c[0].text.includes('[image omitted'));
+    }
+  });
+
+  it('irToAnthropicStdin: the prefix of a growing history with an image stays byte-identical', () => {
+    const base = [
+      { role: 'user', content: [{ type: 'text', text: 'Q1' }, imgPart('data:image/png;base64,QUJD')] },
+      { role: 'assistant', content: 'A1' },
+    ];
+    const a = stdinContent(base);
+    const b = stdinContent([...base, { role: 'user', content: 'Q2' }]);
+    assert.deepEqual(b.slice(0, a.length), a);
+  });
+
+  it('irToAnthropicBlocks stays text-only when images are present', () => {
+    const blocks = irToAnthropicBlocks({ messages: [{ role: 'user', content: [
+      { type: 'text', text: 'x' },
+      imgPart('data:image/png;base64,QUJD'),
+    ] }] });
+    assert.deepEqual(blocks, ['x']);
+  });
+
+  it('irToAnthropicStdin: response_format json_object plus an image keeps the [System] block first', () => {
+    const c = stdinContent(
+      [{ role: 'user', content: [{ type: 'text', text: 'x' }, imgPart('data:image/png;base64,QUJD')] }],
+      { response_format: { type: 'json_object' } },
+    );
+    assert.deepEqual(c.map((b) => b.type), ['text', 'text', 'image']);
+    assert.ok(c[0].text.startsWith('[System]'));
+  });
+
   it('buildCliArgs: --input-format stream-json is passed with and without a bridge', () => {
     for (const args of [
       buildCliArgs('claude-sonnet-4-6', 'SYS'),

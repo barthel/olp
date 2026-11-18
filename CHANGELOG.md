@@ -6,9 +6,12 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ### Images reach the claude CLI as image blocks (ADR 0009 Amendment 8)
 
-- **fix(anthropic): OpenAI `image_url` parts are sent as Anthropic `image` blocks instead of JSON text.** Before, `read_file` on an image (a `role: tool` result with an `image_url` part) and image parts in user turns were rendered with `JSON.stringify`; the base64 payload reached the model as text and Vibe sessions saw no image. Data URLs become a `base64` source, http(s) URLs a `url` source; other URLs become the note `[image omitted: unsupported image URL]`. Array content without image parts is unchanged.
-- **Not verified:** acceptance of `image` blocks by the claude CLI over stdin (the probe failed on an expired OAuth session before any API call); only the generated stdin event is tested.
-- **Not covered:** the mistral and codex plugins still render array content as JSON text.
+- **fix(anthropic): OpenAI `image_url` parts are sent as Anthropic `image` blocks instead of JSON text.** Before, image parts in user turns and tool results were rendered with `JSON.stringify`; the base64 payload reached the model as text. Data URLs become a `base64` source, http(s) URLs a `url` source; other URLs become the note `[image omitted: unsupported image URL]`. Array content without image parts is unchanged.
+- **Verified (narrow):** four probes with claude 2.1.311, claude-haiku-4-5 and solid-colour PNGs through the running instance: a user turn (orange to "Orange") and a tool result (pink to "Rosa", violet to "Magenta", turquoise to "Türkis"); the control with the string `[Image]` answered "Blau" every time. Not a broad compatibility test.
+- **Image handling details:** data URLs accept jpeg, png, gif and webp, optional parameters before `;base64`, whitespace in the payload is removed; svg, empty payloads and a missing URL become the text note. Images in `assistant` turns are dropped.
+- **Does not fix Vibe's `read_file` on images:** Vibe 3.1.2 replaces images in tool results with `[Image]` before the request leaves the client (`_tool_result_text` in its Chat Completions adapter). Images only arrive when the client sends `image_url` in a `user` message.
+- **Side finding, not addressed:** the claude CLI resolves `@/path` mentions in prompt text itself and returned file content without any tool call.
+- **Not verified:** the `url` source and large images (no size limit applied). **Not covered:** the mistral and codex plugins still render array content as JSON text.
 
 ### Tool bridge after a node upgrade (ADR 0009 Amendment 7)
 
