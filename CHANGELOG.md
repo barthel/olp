@@ -4,6 +4,12 @@ All notable changes to OLP land here. Per `CLAUDE.md` release_kit overlay, this 
 
 ## Unreleased
 
+### Images reach the claude CLI as image blocks (ADR 0009 Amendment 8)
+
+- **fix(anthropic): OpenAI `image_url` parts are sent as Anthropic `image` blocks instead of JSON text.** Before, `read_file` on an image (a `role: tool` result with an `image_url` part) and image parts in user turns were rendered with `JSON.stringify`; the base64 payload reached the model as text and Vibe sessions saw no image. Data URLs become a `base64` source, http(s) URLs a `url` source; other URLs become the note `[image omitted: unsupported image URL]`. Array content without image parts is unchanged.
+- **Not verified:** acceptance of `image` blocks by the claude CLI over stdin (the probe failed on an expired OAuth session before any API call); only the generated stdin event is tested.
+- **Not covered:** the mistral and codex plugins still render array content as JSON text.
+
 ### Tool bridge after a node upgrade (ADR 0009 Amendment 7)
 
 - **fix(anthropic): the tool-bridge stub starts with an existing node binary.** `process.execPath` of a long-running OLP can point at a Cellar version that `brew upgrade` removed; the stub then failed silently and Vibe showed tool calls as text. The bridge now falls back to `/opt/homebrew/bin/node` (and other stable paths).

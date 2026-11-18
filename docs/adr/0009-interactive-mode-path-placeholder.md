@@ -512,3 +512,35 @@ claude CLI 2.1.311, stream-json `system/init` event, field `mcp_servers[].status
 
 - **Drafted:** 2026-11-17.
 - **Reviewer:** independent fresh-context reviewer per Iron Rule 10 (2026-11-17), APPROVE with conditions: authority checked against the raw trace (`/tmp/olp-trace.ndjson`, 2x failed / 1072x connected, claude 2.1.311); conditions (review status, corrected counts, three additional tests) addressed in the follow-up commit.
+
+## Amendment 8 - 2026-11-18: Image parts reach the claude CLI as image blocks (anthropic)
+
+### Trigger
+
+Vibe sessions through OLP could not see images. `read_file` on a JPEG returned the image as an OpenAI content part (`{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,..."}}`) in a `role: tool` message. `irToAnthropicBlocks` rendered every array content with `JSON.stringify(msg.content)`, so the base64 payload went to the model as text inside a `[Tool Result ...]` block and no image block was sent. Reproduced locally with `irToAnthropicStdin` (the stdin event contained the `image_url` JSON as text).
+
+### Authority
+
+- Anthropic Messages API content blocks: `image` with `source.type` `base64` (fields `media_type`, `data`) or `url`.
+- OpenAI chat completions content parts: `image_url` with `url` (data URL or http(s) URL), as sent by the entry surface (`lib/ir/openai-to-ir.mjs` passes array content through unchanged).
+- claude CLI `--input-format stream-json` (user event with `message.content` as block array, ADR 0009 Amendment 6).
+
+### Decision
+
+1. `irToAnthropicTurns(ir)` returns one `{ text, images }` entry per turn. `splitContent` turns `image_url` parts into `image` blocks: data URL to a `base64` source, http(s) URL to a `url` source. An unsupported URL (for example `file:`) becomes the text note `[image omitted: unsupported image URL]`.
+2. `irToAnthropicStdin` writes the text block of a turn, then the image blocks of that turn. This also holds for `role: tool` results; the `[Tool Result (...)]` text stays and the image follows it.
+3. Array content without any `image_url` part keeps the JSON text rendering. `irToAnthropicBlocks` and `irToAnthropic` stay text-only (images are not part of the text rendering).
+
+### Consequences
+
+- Images from user turns and tool results are no longer flattened to base64 text.
+- Not verified: acceptance of `image` blocks by the claude CLI over stdin. The probe in this session failed before any API call (`OAuth session expired and could not be refreshed`, zero tokens). Only the generated stdin event is covered by tests.
+- Not verified: whether the CLI and API accept the `url` source for all hosts, and how large images behave (no size limit or downscaling is applied by OLP).
+- Not covered: the mistral and codex plugins still render array content with `JSON.stringify`; images stay text there. `estimateCost` still counts the serialized content, so images inflate the character estimate.
+- Not verified: effect on the cache key of requests with image parts (the IR content is passed through unchanged).
+- Rollback: `git revert` of the commit that introduced this amendment.
+
+### Status
+
+- **Drafted:** 2026-11-18.
+- **Reviewer:** not reviewed (Iron Rule 10 still open).

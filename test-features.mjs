@@ -20849,6 +20849,67 @@ describe('Client tool bridge: names, args, prompt (ADR 0009 Amendment 2)', () =>
     for (const b of ev.message.content) assert.notEqual(b.text.trim(), '');
   });
 
+  // ── ADR 0009 Amendment 8: image parts become image blocks ─────────────
+  it('irToAnthropicStdin: image_url data URL in a user turn becomes a base64 image block', () => {
+    const ev = JSON.parse(irToAnthropicStdin({
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'Was ist das?' },
+        { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,QUJD' } },
+      ] }],
+    }));
+    assert.deepEqual(ev.message.content, [
+      { type: 'text', text: 'Was ist das?' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+    ]);
+  });
+
+  it('irToAnthropicStdin: image in a tool result keeps the [Tool Result] text and adds the image block', () => {
+    const ev = JSON.parse(irToAnthropicStdin({
+      messages: [
+        { role: 'user', content: 'Lies das Bild' },
+        { role: 'assistant', content: '', tool_calls: [{ id: 't1', type: 'function', function: { name: 'read_file', arguments: '{}' } }] },
+        { role: 'tool', tool_call_id: 't1', content: [
+          { type: 'text', text: 'Image file (image/png)' },
+          { type: 'image_url', image_url: { url: 'data:image/png;base64,QUJD' } },
+        ] },
+      ],
+    }));
+    const c = ev.message.content;
+    const i = c.findIndex((b) => b.type === 'text' && b.text === '[Tool Result (read_file, id t1)] Image file (image/png)');
+    assert.ok(i !== -1, 'tool result text present without JSON rendering');
+    assert.equal(c[i + 1].type, 'image');
+    assert.equal(c[i + 1].source.media_type, 'image/png');
+    assert.ok(!JSON.stringify(c).includes('image_url'), 'no image_url JSON text leaks into the prompt');
+  });
+
+  it('irToAnthropicStdin: http(s) image URL becomes a url source, image_url as plain string is accepted', () => {
+    const ev = JSON.parse(irToAnthropicStdin({
+      messages: [{ role: 'user', content: [
+        { type: 'image_url', image_url: { url: 'https://example.com/a.png' } },
+        { type: 'image_url', image_url: 'data:image/webp;base64,QUJD' },
+      ] }],
+    }));
+    const imgs = ev.message.content.filter((b) => b.type === 'image');
+    assert.deepEqual(imgs[0].source, { type: 'url', url: 'https://example.com/a.png' });
+    assert.deepEqual(imgs[1].source, { type: 'base64', media_type: 'image/webp', data: 'QUJD' });
+  });
+
+  it('irToAnthropicStdin: unsupported image URL is replaced by a text note, never sent as raw JSON', () => {
+    const ev = JSON.parse(irToAnthropicStdin({
+      messages: [{ role: 'user', content: [
+        { type: 'text', text: 'x' },
+        { type: 'image_url', image_url: { url: 'file:///tmp/a.png' } },
+      ] }],
+    }));
+    assert.ok(ev.message.content.every((b) => b.type === 'text'));
+    assert.ok(ev.message.content[0].text.includes('[image omitted'));
+  });
+
+  it('irToAnthropic: array content without image parts keeps the JSON text rendering', () => {
+    const prompt = irToAnthropic({ messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }] });
+    assert.equal(prompt, JSON.stringify([{ type: 'text', text: 'hi' }]));
+  });
+
   it('buildCliArgs: --input-format stream-json is passed with and without a bridge', () => {
     for (const args of [
       buildCliArgs('claude-sonnet-4-6', 'SYS'),
